@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IA Monitor</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Pílula: estado padrão, mínima e sempre visível. -->
+    <div id="pill" class="pill" data-tauri-drag-region>
+      <div id="pill-gauges" class="pill-gauges" data-tauri-drag-region></div>
+    </div>
+
+    <!-- Card: o mesmo elemento de janela, apenas maior. -->
+    <div id="card" class="card hidden">
+      <header class="card-head" data-tauri-drag-region>
+        <span class="title" data-tauri-drag-region>IA Monitor</span>
+        <span id="updated" class="updated" data-tauri-drag-region></span>
+        <button id="collapse" class="icon-btn" title="Recolher">▾</button>
+      </header>
+      <div id="providers" class="providers"></div>
+      <section id="projects-section" class="projects hidden">
+        <h2>Projetos · 7 dias</h2>
+        <div id="projects"></div>
+      </section>
+      <footer class="card-foot">
+        <span id="status" class="status"></span>
+      </footer>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

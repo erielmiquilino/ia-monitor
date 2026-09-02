@@ -1,0 +1,335 @@
+/* A janela é transparente e sem decoração: todo o visual vem daqui.
+   Paleta escura fixa — a pílula flutua sobre janelas quaisquer, e seguir o
+   tema do sistema a faria sumir sobre metade dos fundos. */
+:root {
+  --bg: rgba(18, 18, 22, 0.94);
+  --bg-solid: #121216;
+  --fg: #e8e8ec;
+  --fg-dim: #8b8b96;
+  --line: rgba(255, 255, 255, 0.08);
+  --track: rgba(255, 255, 255, 0.10);
+  --normal: #4ba3ff;
+  --warn: #f0b03c;
+  --critical: #f2555a;
+  --unknown: #6b6b76;
+  --radius: 10px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  background: transparent;
+  overflow: hidden;
+  font: 12px/1.35 "Segoe UI", system-ui, sans-serif;
+  color: var(--fg);
+  /* Sem seleção de texto: a janela inteira é área de arraste. */
+  user-select: none;
+  cursor: default;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ---------- Pílula ---------- */
+
+.pill {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  backdrop-filter: blur(12px);
+}
+
+.pill-gauges {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.pill-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+
+.pill-bar {
+  position: relative;
+  flex: 1;
+  min-width: 18px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.pill-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.pill-value {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.pill-tag {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+}
+
+/* Provedor com dado antigo: atenuado, nunca escondido. */
+.pill-item.stale-item {
+  opacity: 0.55;
+}
+
+/* ---------- Card ---------- */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  backdrop-filter: blur(14px);
+  overflow: hidden;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.updated {
+  flex: 1;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+.icon-btn {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--track);
+  color: var(--fg);
+}
+
+.providers {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 10px 8px;
+}
+
+.provider {
+  padding: 6px 0 5px;
+  border-bottom: 1px solid var(--line);
+}
+
+.provider:last-child {
+  border-bottom: 0;
+}
+
+.provider-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.provider-name {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.provider-plan {
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+.gauge {
+  display: grid;
+  grid-template-columns: 84px 1fr 66px;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 3px;
+}
+
+/* Um limite que não é o vigente continua real, só não é o que morde
+   primeiro. Fica atenuado em vez de escondido. */
+.gauge.inactive .gauge-label,
+.gauge.inactive .gauge-value {
+  opacity: 0.55;
+}
+
+.gauge-label {
+  font-size: 10px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gauge-bar {
+  position: relative;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+/* Marcador de ritmo: onde a barra estaria se o consumo fosse uniforme.
+   Precisa ser legível tanto sobre o trilho vazio quanto sobre o
+   preenchimento colorido — daí o contorno escuro em volta do traço claro. */
+.bar-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  margin-left: -1px;
+  /* Contorno desenhado no próprio gradiente. Um `box-shadow` seria cortado
+     pelo `overflow: hidden` da barra, que existe para o preenchimento
+     respeitar os cantos arredondados. */
+  background: linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0.55) 0 1px,
+    rgba(255, 255, 255, 0.95) 1px 2px,
+    rgba(0, 0, 0, 0.55) 2px 3px
+  );
+  pointer-events: none;
+}
+
+.gauge-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.gauge-value {
+  font-size: 10px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.gauge-note {
+  grid-column: 2 / -1;
+  font-size: 9px;
+  color: var(--fg-dim);
+  margin: -1px 0 4px;
+}
+
+.provider-error {
+  font-size: 10px;
+  color: var(--warn);
+  padding: 2px 0 4px;
+}
+
+/* Idade do dado: o Codex só atualiza quando roda, e esconder isso seria
+   apresentar um número velho como se fosse ao vivo. */
+.stale {
+  font-size: 9px;
+  color: var(--warn);
+  padding-top: 2px;
+}
+
+/* ---------- Projetos ---------- */
+
+.projects {
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--line);
+}
+
+.projects h2 {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-bottom: 5px;
+}
+
+.project {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  font-size: 10px;
+  padding: 1px 0;
+}
+
+.project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-value {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.card-foot {
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--line);
+}
+
+.status {
+  font-size: 9px;
+  color: var(--fg-dim);
+}
+
+/* ---------- Severidade ---------- */
+
+.sev-normal {
+  background: var(--normal);
+}
+.sev-warn {
+  background: var(--warn);
+}
+.sev-critical {
+  background: var(--critical);
+}
+.sev-unknown {
+  background: var(--unknown);
+}
+
+.txt-warn {
+  color: var(--warn);
+}
+.txt-critical {
+  color: var(--critical);
+}

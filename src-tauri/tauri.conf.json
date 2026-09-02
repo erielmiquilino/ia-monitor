@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "IA Monitor",
+  "version": "0.1.0",
+  "identifier": "io.github.erielmiquilino.ia-monitor",
+  "build": {
+    "frontendDist": "../ui",
+    "beforeBuildCommand": "node --check ui/app.js"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "IA Monitor",
+        "width": 320,
+        "height": 34,
+        "minWidth": 280,
+        "minHeight": 34,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "center": false,
+        "visible": false,
+        "additionalBrowserArgs": "--disable-gpu --disable-gpu-compositing --renderer-process-limit=1 --process-per-site --disable-dev-shm-usage --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints --js-flags=--max-old-space-size=32 --disable-background-networking"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/256x256.png",
+      "icons/icon.png"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
