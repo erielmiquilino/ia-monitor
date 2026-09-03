@@ -144,9 +144,17 @@ fn current_snapshot(state: tauri::State<'_, Arc<AppState>>) -> Option<SnapshotVi
 /// monitor com escala; e gravar a posição do card faria a pílula reaparecer
 /// no canto onde o card começava.
 fn save_position(store: &Store, window: &WebviewWindow, expanded: bool) {
+    // Minimizar dispara `Moved` com (-32000,-32000). Gravar isso deixaria a
+    // posição salva impossível de restaurar.
+    if window.is_minimized().unwrap_or(false) {
+        return;
+    }
     let Some(current) = logical_position(window) else {
         return;
     };
+    if !on_some_monitor(window, current) {
+        return;
+    }
     let pill = if expanded {
         anchored_bottom_right(current, logical_size(window).unwrap_or(CARD), PILL)
     } else {
@@ -249,6 +257,27 @@ fn default_position(window: &WebviewWindow) {
     ));
 }
 
+/// A posição cai sobre algum monitor conectado?
+///
+/// Serve para dois casos: monitor desconectado desde a última execução, e a
+/// posição de parqueamento que o Windows dá a janelas minimizadas.
+fn on_some_monitor(window: &WebviewWindow, pos: (f64, f64)) -> bool {
+    window
+        .available_monitors()
+        .map(|monitors| {
+            monitors.iter().any(|m| {
+                let scale = m.scale_factor();
+                let p = m.position().to_logical::<f64>(scale);
+                let s = m.size().to_logical::<f64>(scale);
+                pos.0 >= p.x - 50.0
+                    && pos.1 >= p.y - 50.0
+                    && pos.0 < p.x + s.width
+                    && pos.1 < p.y + s.height
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Posição salva da pílula, em coordenadas lógicas.
 fn saved_pill_position(store: &Store) -> Option<(f64, f64)> {
     let raw = store.config_get(POSITION_KEY).ok().flatten()?;
@@ -276,22 +305,7 @@ fn restore_position(store: &Store, window: &WebviewWindow, expanded: bool) {
 
     // Monitor desconectado deixaria a janela fora da tela, e como ela não
     // aparece na barra de tarefas não haveria como trazê-la de volta.
-    let on_some_monitor = window
-        .available_monitors()
-        .map(|monitors| {
-            monitors.iter().any(|m| {
-                let scale = m.scale_factor();
-                let p = m.position().to_logical::<f64>(scale);
-                let s = m.size().to_logical::<f64>(scale);
-                pill.0 >= p.x - 50.0
-                    && pill.1 >= p.y - 50.0
-                    && pill.0 < p.x + s.width
-                    && pill.1 < p.y + s.height
-            })
-        })
-        .unwrap_or(false);
-
-    if !on_some_monitor {
+    if !on_some_monitor(window, pill) {
         default_position(window);
         return;
     }
@@ -305,10 +319,32 @@ fn restore_position(store: &Store, window: &WebviewWindow, expanded: bool) {
     let _ = window.set_position(LogicalPosition::new(clamped.0, clamped.1));
 }
 
+/// Traz a janela de volta — inclusive de um estado minimizado.
+///
+/// `show()` só mexe em visibilidade e não desfaz minimização. "Mostrar
+/// desktop" (Win+D) minimiza tudo, e o Windows parqueia a janela minimizada
+/// em (-32000,-32000); sem `unminimize` o clique na bandeja não trazia nada
+/// de volta, porque a janela já estava "visível" — só que fora da tela.
 fn show_window(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.set_focus();
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = w.unminimize();
+    let _ = w.show();
+    let _ = w.set_focus();
+
+    // A posição parqueada da minimização não é uma posição real; devolve a
+    // janela para onde ela estava antes.
+    if let (Ok(store), Some(pos)) = (Store::open_default(), logical_position(&w)) {
+        if !on_some_monitor(&w, pos) {
+            let expandido = store
+                .config_get(EXPANDED_KEY)
+                .ok()
+                .flatten()
+                .map(|v| v == "1")
+                .unwrap_or(false);
+            restore_position(&store, &w, expandido);
+        }
     }
 }
 
