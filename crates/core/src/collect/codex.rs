@@ -9,7 +9,7 @@
 
 use crate::collect::{home_dir, Collector};
 use crate::model::{
-    expected_fraction, format_pt_br, humanize_until, Gauge, Provider, ProviderSample, Severity,
+    expected_fraction, format_pt_br, reset_label, Gauge, Provider, ProviderSample, Severity,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, TimeZone, Utc};
@@ -184,7 +184,7 @@ impl CodexCollector {
             label,
             fraction: Some(fraction),
             headline: format!("{}%", w.used_percent.round() as i64),
-            subtitle: resets_at.map(|r| format!("reseta em {}", humanize_until(r, now))),
+            subtitle: resets_at.map(|r| reset_label(r, now)),
             severity: Severity::from_fraction(Some(fraction)),
             resets_at,
             active: true,

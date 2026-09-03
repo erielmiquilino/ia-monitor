@@ -11,7 +11,7 @@
 
 use crate::collect::{retry_after_seconds, Collector, RateLimited};
 use crate::model::{
-    expected_fraction, format_pt_br, humanize_until, Gauge, Provider, ProviderSample, Severity,
+    expected_fraction, format_pt_br, reset_label, Gauge, Provider, ProviderSample, Severity,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
@@ -179,7 +179,7 @@ impl CursorCollector {
             fraction: Some(fraction),
             // A própria IDE arredonda para inteiro; espelhamos para bater na conferência.
             headline: format!("{}%", percent.round() as i64),
-            subtitle: resets_at.map(|r| format!("reseta em {}", humanize_until(r, now))),
+            subtitle: resets_at.map(|r| reset_label(r, now)),
             severity: Severity::from_fraction(Some(fraction)),
             resets_at,
             active: true,

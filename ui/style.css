@@ -102,10 +102,13 @@ body {
 
 /* ---------- Card ---------- */
 
+/* Altura natural: a janela é redimensionada para caber o conteúdo, então
+   fixar 100vh criaria espaço morto com poucos medidores e barra de rolagem
+   quando as notas de ritmo entram. */
 .card {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: auto;
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -150,9 +153,17 @@ body {
 }
 
 .providers {
+  padding: 4px 10px 8px;
+}
+
+/* Só quando o conteúdo não cabe na tela: aí rolar é melhor que cortar. */
+body.scrolls .card {
+  height: 100vh;
+}
+
+body.scrolls .providers {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 10px 8px;
 }
 
 .provider {

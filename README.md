@@ -27,7 +27,7 @@ Cursor Models  ███|░░░░░░░   16%      ← 68% do ciclo decor
                reseta em 10 dias · 52 pts abaixo do ritmo
 
 Sessão 5h      ██████|██░░   82%      ← 55% da janela decorrida, 82% gasto
-               reseta em 1h10m · 27 pts acima do ritmo · estoura em 42m
+               reseta em 1h10m (hoje às 14h) · 27 pts acima do ritmo
 ```
 
 O marcador só aparece quando a duração da janela é **conhecida**, nunca

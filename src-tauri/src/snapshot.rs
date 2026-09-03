@@ -28,6 +28,9 @@ pub struct SampleView {
     pub error: Option<String>,
     /// Preenchido só quando o dado é velho o bastante para importar.
     pub age_text: Option<String>,
+    /// Medidor que a pílula deve mostrar. Decidido aqui, não na UI: qual
+    /// limite representa o provedor é conhecimento do domínio.
+    pub primary_gauge_id: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -113,10 +116,9 @@ fn note_texts(
             if let Some(delta) = pace_delta(gauge) {
                 if delta.abs() >= PACE_NOTICE_POINTS {
                     let lado = if delta > 0.0 { "acima" } else { "abaixo" };
-                    parts.push(format!(
-                        "{} pts {lado} do ritmo",
-                        format_pt_br(delta.abs()).replace(",00", "")
-                    ));
+                    // Ponto percentual inteiro: "7,39 pts" sugere uma precisão
+                    // que a medida não tem e só ocupa espaço.
+                    parts.push(format!("{} pts {lado} do ritmo", delta.abs().round() as i64));
                 }
             }
 
@@ -191,6 +193,7 @@ pub fn build(store: &Store, samples: &[ProviderSample], now: DateTime<Utc>) -> S
                 gauges: s.gauges.clone(),
                 error: s.error.clone(),
                 age_text: age_text(s),
+                primary_gauge_id: s.primary_gauge().map(|g| g.id.clone()),
             })
             .collect(),
         burn: note_texts(store, samples, now),

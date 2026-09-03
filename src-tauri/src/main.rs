@@ -21,7 +21,7 @@ use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewWi
 use tauri_plugin_notification::NotificationExt;
 
 const PILL: (f64, f64) = (320.0, 34.0);
-const CARD: (f64, f64) = (348.0, 524.0);
+const CARD: (f64, f64) = (360.0, 420.0);
 const POSITION_KEY: &str = "window.position";
 /// Card fixado precisa sobreviver ao reinício: quem deixa aberto quer ver
 /// os números sem clicar toda vez que liga a máquina.
@@ -63,7 +63,10 @@ fn set_expanded(
     state: tauri::State<'_, Arc<AppState>>,
     expanded: bool,
 ) -> Result<(), String> {
-    let (from, to) = if expanded { (PILL, CARD) } else { (CARD, PILL) };
+    // Ao recolher, o tamanho de origem é o que a janela tem AGORA, não o
+    // piso `CARD`: o card cresceu para caber o conteúdo.
+    let atual = logical_size(&window).unwrap_or(CARD);
+    let (from, to) = if expanded { (PILL, CARD) } else { (atual, PILL) };
     let before = logical_position(&window);
 
     window
@@ -98,6 +101,24 @@ fn set_expanded(
     Ok(())
 }
 
+/// Ajusta a altura do card ao conteúdo, dentro do que a tela comporta.
+///
+/// A altura fixa anterior fazia sobrar espaço morto com poucos medidores e
+/// aparecer barra de rolagem quando as notas de ritmo e projeção entravam.
+/// Devolve a altura aplicada: se veio menor que a pedida, o webview reativa
+/// a rolagem em vez de cortar conteúdo.
+#[tauri::command]
+fn fit_card(window: WebviewWindow, height: f64) -> f64 {
+    let disponivel = monitor_bounds(&window)
+        .map(|(mpos, msize, _)| msize.1 - TASKBAR_RESERVE - EDGE_MARGIN * 2.0 - mpos.1.max(0.0))
+        .unwrap_or(CARD.1);
+
+    let alvo = height.clamp(CARD.1, disponivel.max(CARD.1));
+    let _ = window.set_size(LogicalSize::new(CARD.0, alvo));
+    keep_on_screen(&window, CARD.0, alvo);
+    alvo
+}
+
 /// Estado inicial da janela, consultado pelo webview ao abrir.
 #[tauri::command]
 fn start_expanded(state: tauri::State<'_, Arc<AppState>>) -> bool {
@@ -127,7 +148,7 @@ fn save_position(store: &Store, window: &WebviewWindow, expanded: bool) {
         return;
     };
     let pill = if expanded {
-        anchored_bottom_right(current, CARD, PILL)
+        anchored_bottom_right(current, logical_size(window).unwrap_or(CARD), PILL)
     } else {
         current
     };
@@ -165,6 +186,17 @@ fn monitor_bounds(window: &WebviewWindow) -> Option<((f64, f64), (f64, f64), f64
     let size = monitor.size().to_logical::<f64>(scale);
     let pos = monitor.position().to_logical::<f64>(scale);
     Some(((pos.x, pos.y), (size.width, size.height), scale))
+}
+
+/// Tamanho atual da janela em coordenadas lógicas.
+///
+/// Desde que o card passou a se ajustar ao conteúdo, `CARD` é só um piso —
+/// ancorar por ele deixaria a pílula deslocada pela diferença entre a altura
+/// real e a mínima.
+fn logical_size(window: &WebviewWindow) -> Option<(f64, f64)> {
+    let (_, _, scale) = monitor_bounds(window)?;
+    let s = window.outer_size().ok()?.to_logical::<f64>(scale);
+    Some((s.width, s.height))
 }
 
 fn logical_position(window: &WebviewWindow) -> Option<(f64, f64)> {
@@ -496,7 +528,7 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        .invoke_handler(tauri::generate_handler![set_expanded, current_snapshot, start_expanded])
+        .invoke_handler(tauri::generate_handler![set_expanded, current_snapshot, start_expanded, fit_card])
         .setup(|app| {
             let store = Arc::new(Store::open_default()?);
             let state = Arc::new(AppState {
@@ -798,6 +830,25 @@ mod tests {
         let agora = Utc::now();
         let s = display_sample(Provider::Codex, &PollState::new(agora), agora);
         assert!(s.error.unwrap().contains("aguardando"));
+    }
+
+    /// Desde que o card se ajusta ao conteudo, ancorar pela constante `CARD`
+    /// desloca a pilula pela diferenca entre a altura real e a minima.
+    #[test]
+    fn ancora_usa_a_altura_real_do_card() {
+        let pilula = (1192.0, 774.0);
+        // Card crescido para 525 (o piso e 420).
+        let card_real = (CARD.0, 525.0);
+        let card = anchored_bottom_right(pilula, PILL, card_real);
+        let voltou = anchored_bottom_right(card, card_real, PILL);
+        assert!(same_spot(voltou, pilula), "voltou para {voltou:?}");
+
+        // Com a constante, o erro e exatamente a diferenca de altura.
+        let errado = anchored_bottom_right(card, CARD, PILL);
+        assert!(
+            (errado.1 - pilula.1).abs() > 100.0,
+            "o bug precisa ser visivel: {errado:?}"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! token e quebraria o Claude Code do usuário.
 
 use crate::collect::{home_dir, Collector};
-use crate::model::{expected_fraction, humanize_until, Gauge, Provider, ProviderSample, Severity};
+use crate::model::{expected_fraction, reset_label, Gauge, Provider, ProviderSample, Severity};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -221,7 +221,7 @@ impl ClaudeCollector {
                 label: Self::label_for(entry),
                 fraction: Some(fraction),
                 headline: format!("{}%", entry.percent.round() as i64),
-                subtitle: resets_at.map(|r| format!("reseta em {}", humanize_until(r, now))),
+                subtitle: resets_at.map(|r| reset_label(r, now)),
                 severity,
                 resets_at,
                 active: entry.is_active.unwrap_or(true),

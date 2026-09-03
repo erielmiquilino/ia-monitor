@@ -184,6 +184,38 @@ impl ProviderSample {
         self.retry_after.is_some()
     }
 
+    /// Medidor que representa o provedor na visão compacta.
+    ///
+    /// Escolha explícita, não heurística: antes a pílula pegava a maior
+    /// fração entre os ativos, então quando a janela de 5h do Claude ficava
+    /// inativa era o limite por modelo (Fable) que aparecia — um número que
+    /// o usuário não estava procurando.
+    pub fn primary_gauge(&self) -> Option<&Gauge> {
+        let preferido = match self.provider {
+            // A janela de 5h é a que morde no dia a dia; semanal e por
+            // modelo são contexto, e só aparecem no card.
+            Provider::Claude => "claude.session",
+            Provider::Cursor => "cursor.auto",
+            Provider::Codex => "codex.credits",
+        };
+        self.gauges
+            .iter()
+            .find(|g| g.id == preferido && g.fraction.is_some())
+            // Plano sem o medidor preferido (Codex `plus` usa janelas): cai
+            // no de maior consumo, que é o que mais importa saber.
+            .or_else(|| {
+                self.gauges
+                    .iter()
+                    .filter(|g| g.fraction.is_some())
+                    .max_by(|a, b| {
+                        a.fraction
+                            .unwrap_or(0.0)
+                            .partial_cmp(&b.fraction.unwrap_or(0.0))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            })
+    }
+
     /// Severidade agregada — alimenta a cor do ícone da bandeja.
     ///
     /// Um provedor com dado antigo mas real continua colorido: pintar de
@@ -220,6 +252,45 @@ pub fn humanize_until(target: DateTime<Utc>, now: DateTime<Utc>) -> String {
     } else {
         format!("{m}m")
     }
+}
+
+/// Instante do reset no fuso local: "hoje às 22h", "sex 04/09 às 22h40".
+///
+/// Só o tempo restante não basta para planejar: "reseta em 1 dia" não diz se
+/// isso cai antes ou depois do fim do expediente.
+pub fn local_moment(target: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    use chrono::{Datelike, Local, Timelike};
+
+    let alvo = target.with_timezone(&Local);
+    let hoje = now.with_timezone(&Local).date_naive();
+    let dia = alvo.date_naive();
+
+    // Minuto zero é o caso comum nos resets semanais; "22h" lê melhor que
+    // "22h00".
+    let hora = if alvo.minute() == 0 {
+        format!("{}h", alvo.hour())
+    } else {
+        format!("{}h{:02}", alvo.hour(), alvo.minute())
+    };
+
+    if dia == hoje {
+        return format!("hoje às {hora}");
+    }
+    if Some(dia) == hoje.succ_opt() {
+        return format!("amanhã às {hora}");
+    }
+    const DIAS: [&str; 7] = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"];
+    let nome = DIAS[alvo.weekday().num_days_from_monday() as usize];
+    format!("{nome} {:02}/{:02} às {hora}", alvo.day(), alvo.month())
+}
+
+/// "reseta em 2h19m (hoje às 22h)" — quanto falta e quando exatamente.
+pub fn reset_label(target: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    format!(
+        "reseta em {} ({})",
+        humanize_until(target, now),
+        local_moment(target, now)
+    )
 }
 
 /// Rótulos curtos e distinguíveis para uma lista de caminhos.
@@ -329,6 +400,122 @@ mod model_tests {
 
         g.expected = None;
         assert!(pace_delta(&g).is_none(), "sem marcador, sem comparação");
+    }
+
+    fn medidor(id: &str, f: f64, ativo: bool) -> Gauge {
+        Gauge {
+            id: id.into(),
+            label: id.into(),
+            fraction: Some(f),
+            headline: format!("{}%", (f * 100.0) as i64),
+            subtitle: None,
+            severity: Severity::Normal,
+            resets_at: None,
+            active: ativo,
+            expected: None,
+        }
+    }
+
+    fn amostra(p: Provider, gauges: Vec<Gauge>) -> ProviderSample {
+        ProviderSample {
+            provider: p,
+            plan: None,
+            gauges,
+            observed_at: Utc::now(),
+            source_at: Some(Utc::now()),
+            error: None,
+            retry_after: None,
+        }
+    }
+
+    /// O bug relatado: com a sessao de 5h inativa, a pilula passava a mostrar
+    /// o limite por modelo, que tinha fracao maior.
+    #[test]
+    fn pilula_mostra_a_sessao_mesmo_inativa_e_menor() {
+        let s = amostra(
+            Provider::Claude,
+            vec![
+                medidor("claude.session", 0.06, false),
+                medidor("claude.weekly_all", 0.21, true),
+                medidor("claude.weekly_scoped.fable", 0.56, false),
+            ],
+        );
+        assert_eq!(s.primary_gauge().unwrap().id, "claude.session");
+    }
+
+    #[test]
+    fn cada_provedor_tem_seu_medidor_principal() {
+        let cur = amostra(
+            Provider::Cursor,
+            vec![medidor("cursor.api", 0.9, true), medidor("cursor.auto", 0.1, true)],
+        );
+        assert_eq!(cur.primary_gauge().unwrap().id, "cursor.auto");
+
+        let cdx = amostra(Provider::Codex, vec![medidor("codex.credits", 0.2, true)]);
+        assert_eq!(cdx.primary_gauge().unwrap().id, "codex.credits");
+    }
+
+    /// Plano sem o medidor preferido (Codex `plus` usa janelas): cai no de
+    /// maior consumo em vez de nao mostrar nada.
+    #[test]
+    fn sem_o_preferido_usa_o_de_maior_consumo() {
+        let s = amostra(
+            Provider::Codex,
+            vec![medidor("codex.primary", 0.3, true), medidor("codex.secondary", 0.7, true)],
+        );
+        assert_eq!(s.primary_gauge().unwrap().id, "codex.secondary");
+    }
+
+    #[test]
+    fn provedor_sem_medidores_nao_tem_principal() {
+        assert!(amostra(Provider::Claude, vec![]).primary_gauge().is_none());
+    }
+
+    /// Datas construidas a partir do fuso local para o teste nao depender do
+    /// fuso da maquina.
+    fn no_local(dias: i64, hora: u32, minuto: u32) -> DateTime<Utc> {
+        use chrono::{Local, TimeZone};
+        let dia = Local::now().date_naive() + chrono::Duration::days(dias);
+        Local
+            .from_local_datetime(&dia.and_hms_opt(hora, minuto, 0).unwrap())
+            .single()
+            .expect("horario local valido")
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn momento_do_reset_usa_hoje_e_amanha() {
+        let agora = no_local(0, 9, 0);
+        assert_eq!(local_moment(no_local(0, 22, 0), agora), "hoje às 22h");
+        assert_eq!(local_moment(no_local(1, 1, 0), agora), "amanhã às 1h");
+    }
+
+    /// Minuto zero e o caso comum nos resets semanais; "22h" le melhor.
+    #[test]
+    fn minuto_zero_e_omitido() {
+        let agora = no_local(0, 9, 0);
+        assert_eq!(local_moment(no_local(0, 22, 0), agora), "hoje às 22h");
+        assert_eq!(local_moment(no_local(0, 22, 40), agora), "hoje às 22h40");
+    }
+
+    /// Alem de amanha entra dia da semana e data, que e o que permite
+    /// planejar sem contar nos dedos.
+    #[test]
+    fn datas_distantes_ganham_dia_da_semana() {
+        let agora = no_local(0, 9, 0);
+        let texto = local_moment(no_local(4, 22, 0), agora);
+        assert!(texto.contains('/'), "{texto}");
+        assert!(texto.contains("às 22h"), "{texto}");
+        assert!(!texto.contains("hoje") && !texto.contains("amanhã"), "{texto}");
+    }
+
+    /// O rotulo completo junta quanto falta e quando exatamente.
+    #[test]
+    fn rotulo_de_reset_traz_prazo_e_instante() {
+        let agora = no_local(0, 9, 0);
+        let texto = reset_label(no_local(0, 22, 0), agora);
+        assert!(texto.starts_with("reseta em "), "{texto}");
+        assert!(texto.contains("(hoje às 22h)"), "{texto}");
     }
 
     #[test]

@@ -56,13 +56,17 @@ function addMarker(bar, gauge) {
   bar.appendChild(mark);
 }
 
-/** O medidor que representa o provedor na pílula: o mais crítico entre os
- *  vigentes. É o que vai morder primeiro, e é o único que cabe. */
+/** O medidor que representa o provedor na pílula.
+ *
+ *  Quem decide é o backend (`primaryGaugeId`), porque qual limite representa
+ *  cada provedor é conhecimento do domínio. A heurística anterior pegava a
+ *  maior fração entre os ativos e, quando a janela de 5h do Claude ficava
+ *  inativa, mostrava o limite por modelo — um número que ninguém procurava.
+ */
 function headlineGauge(sample) {
-  const scored = sample.gauges
-    .filter((g) => g.fraction !== null && g.fraction !== undefined)
-    .sort((a, b) => (b.active === a.active ? b.fraction - a.fraction : b.active ? 1 : -1));
-  return scored[0] ?? sample.gauges[0] ?? null;
+  const escolhido = sample.gauges.find((g) => g.id === sample.primaryGaugeId);
+  if (escolhido) return escolhido;
+  return sample.gauges.find((g) => g.fraction !== null && g.fraction !== undefined) ?? null;
 }
 
 function renderPill(snapshot) {
@@ -199,10 +203,40 @@ function renderCard(snapshot) {
   text(el.status, snapshot.statusText);
 }
 
+
+/** Altura real do conteúdo, medida sem a rolagem ativa.
+ *
+ *  Com `.scrolls` ligado o documento fica preso ao tamanho da janela, e medir
+ *  nesse estado devolveria sempre a altura atual — a janela nunca encolheria.
+ */
+function alturaDoConteudo() {
+  const rolando = document.body.classList.contains("scrolls");
+  if (rolando) document.body.classList.remove("scrolls");
+  const h = Math.ceil(document.documentElement.scrollHeight);
+  if (rolando) document.body.classList.add("scrolls");
+  return h;
+}
+
+/** Pede ao backend a altura que o conteúdo precisa. Se a tela não comportar,
+ *  religa a rolagem em vez de cortar. */
+async function ajustarCard() {
+  if (!expanded) return;
+  const desejada = alturaDoConteudo();
+  try {
+    const aplicada = await invoke("fit_card", { height: desejada });
+    document.body.classList.toggle("scrolls", aplicada < desejada - 1);
+  } catch {}
+}
+
 function render(snapshot) {
   latest = snapshot;
-  if (expanded) renderCard(snapshot);
-  else renderPill(snapshot);
+  if (expanded) {
+    renderCard(snapshot);
+    // Depois do layout assentar: medir antes disso devolve a altura antiga.
+    requestAnimationFrame(ajustarCard);
+  } else {
+    renderPill(snapshot);
+  }
 }
 
 async function setExpanded(next) {
@@ -212,6 +246,7 @@ async function setExpanded(next) {
   el.card.classList.toggle("hidden", !next);
   // O redimensionamento é do backend: é a mesma janela mudando de tamanho,
   // não um segundo webview.
+  if (!next) document.body.classList.remove("scrolls");
   await invoke("set_expanded", { expanded: next });
   if (latest) render(latest);
 }
