@@ -15,7 +15,7 @@ use ia_monitor_core::store::Store;
 use snapshot::SnapshotView;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder};
+use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewWindow};
 use tauri_plugin_notification::NotificationExt;
@@ -43,6 +43,13 @@ struct AppState {
     alerts: Mutex<AlertState>,
     paused: Mutex<bool>,
     anchor: Mutex<Option<Anchor>>,
+    /// Acorda o laço fora do ritmo normal. Sem isto, ligar ou desligar um
+    /// provedor só apareceria no próximo ciclo — até um minuto depois.
+    wake: Arc<tokio::sync::Notify>,
+}
+
+fn provider_menu_id(p: Provider) -> String {
+    format!("prov:{}", p.as_str())
 }
 
 /// Nova posição ao trocar de tamanho mantendo o canto **inferior direito**
@@ -447,7 +454,14 @@ async fn run_loop(app: AppHandle, state: Arc<AppState>) {
         let idle = scheduler::idle_seconds();
         let mut fresh: Vec<ProviderSample> = Vec::new();
 
-        for provider in Provider::ALL {
+        // Provedor desligado não é consultado nem exibido. Descartar o estado
+        // dele também evita que um dado velho reapareça ao religar.
+        let ativos = state.store.enabled_providers();
+        poll.retain(|p, _| ativos.contains(p));
+
+        for provider in ativos.iter().copied() {
+            poll.entry(provider)
+                .or_insert_with(|| PollState::restored(&state.store, provider, now));
             let vencido = poll.get(&provider).map(|s| s.due <= now).unwrap_or(true);
             if !vencido {
                 continue;
@@ -497,15 +511,22 @@ async fn run_loop(app: AppHandle, state: Arc<AppState>) {
             let store = state.store.clone();
             let to_record = fresh.clone();
             // SQLite e leitura de logs são bloqueantes; fora do executor async.
+            let claude_on = ativos.contains(&Provider::Claude);
+            let codex_on = ativos.contains(&Provider::Codex);
             let _ = tokio::task::spawn_blocking(move || {
                 let _ = store.record_samples(&to_record);
-                let _ = ia_monitor_core::ingest::claude_jsonl::ingest(&store);
-                let _ = ia_monitor_core::ingest::codex_rollout::ingest(&store);
+                // Ler log de provedor desligado seria trabalho jogado fora.
+                if claude_on {
+                    let _ = ia_monitor_core::ingest::claude_jsonl::ingest(&store);
+                }
+                if codex_on {
+                    let _ = ia_monitor_core::ingest::codex_rollout::ingest(&store);
+                }
             })
             .await;
         }
 
-        if historico_due <= now {
+        if historico_due <= now && ativos.contains(&Provider::Cursor) {
             let _ = ia_monitor_core::ingest::cursor_events::ingest(&state.store, &client).await;
             let _ = state
                 .store
@@ -513,9 +534,9 @@ async fn run_loop(app: AppHandle, state: Arc<AppState>) {
             historico_due = now + ChronoDuration::minutes(CURSOR_HISTORY_MINUTES);
         }
 
-        let samples: Vec<ProviderSample> = Provider::ALL
+        let samples: Vec<ProviderSample> = ativos
             .iter()
-            .map(|p| display_sample(*p, &poll[p], now))
+            .filter_map(|p| poll.get(p).map(|st| display_sample(*p, st, now)))
             .collect();
         let view = {
             let store = state.store.clone();
@@ -546,9 +567,14 @@ async fn run_loop(app: AppHandle, state: Arc<AppState>) {
         }
 
         // Dorme até o próximo provedor vencer, e não além disso: quem está
-        // recuando por 429 não pode segurar quem está saudável.
+        // recuando por 429 não pode segurar quem está saudável. Ligar ou
+        // desligar um provedor interrompe a espera.
         let proximo = poll.values().map(|s| s.due).min();
-        tokio::time::sleep(scheduler::sleep_until(proximo, Utc::now())).await;
+        let espera = scheduler::sleep_until(proximo, Utc::now());
+        tokio::select! {
+            _ = tokio::time::sleep(espera) => {}
+            _ = state.wake.notified() => {}
+        }
     }
 }
 
@@ -573,6 +599,7 @@ fn main() {
                 alerts: Mutex::new(AlertState::new()),
                 paused: Mutex::new(false),
                 anchor: Mutex::new(None),
+                wake: Arc::new(tokio::sync::Notify::new()),
             });
             app.manage(state.clone());
 
@@ -617,6 +644,22 @@ fn main() {
             let pausar = CheckMenuItemBuilder::with_id("pausar", "Pausar coleta")
                 .checked(false)
                 .build(app)?;
+
+            // Um item por provedor. Quem não tem uma das assinaturas desliga
+            // e para de ver — e de consultar — o que não usa.
+            let mut itens_provedor = Vec::new();
+            for p in Provider::ALL {
+                let item = CheckMenuItemBuilder::with_id(provider_menu_id(p), p.label())
+                    .checked(store.provider_enabled(p))
+                    .build(app)?;
+                itens_provedor.push((p, item));
+            }
+            let mut provedores = SubmenuBuilder::new(app, "Provedores");
+            for (_, item) in &itens_provedor {
+                provedores = provedores.item(item);
+            }
+            let provedores = provedores.build()?;
+
             let autostart = CheckMenuItemBuilder::with_id("autostart", "Iniciar com o Windows")
                 .checked({
                     use tauri_plugin_autostart::ManagerExt;
@@ -625,7 +668,9 @@ fn main() {
                 .build(app)?;
             let sair = MenuItemBuilder::with_id("sair", "Sair").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&abrir, &pausar, &autostart])
+                .items(&[&abrir, &pausar])
+                .item(&provedores)
+                .items(&[&autostart])
                 .separator()
                 .items(&[&sair])
                 .build()?;
@@ -652,7 +697,18 @@ fn main() {
                         };
                     }
                     "sair" => app.exit(0),
-                    _ => {}
+                    outro => {
+                        if let Some((p, item)) =
+                            itens_provedor.iter().find(|(p, _)| provider_menu_id(*p) == outro)
+                        {
+                            let novo = !tray_state.store.provider_enabled(*p);
+                            let _ = tray_state.store.set_provider_enabled(*p, novo);
+                            let _ = item.set_checked(novo);
+                            // Acorda o laço: esperar até 60s para a mudança
+                            // aparecer faria o clique parecer sem efeito.
+                            tray_state.wake.notify_one();
+                        }
+                    }
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {

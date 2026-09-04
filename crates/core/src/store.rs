@@ -44,6 +44,10 @@ pub struct TailCursor {
     pub offset: u64,
 }
 
+fn provider_key(provider: Provider) -> String {
+    format!("provider.enabled:{}", provider.as_str())
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
 }
@@ -219,6 +223,31 @@ impl Store {
         Ok(())
     }
 
+    /// Um provedor desligado some da UI **e para de ser consultado** — o
+    /// ganho maior é esse: cota de requisição não gasta com quem não se usa.
+    ///
+    /// O padrão é ligado, então uma instalação nova mostra tudo e quem não
+    /// tem uma das assinaturas desliga o que sobra.
+    pub fn provider_enabled(&self, provider: Provider) -> bool {
+        self.config_get(&provider_key(provider))
+            .ok()
+            .flatten()
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    }
+
+    pub fn set_provider_enabled(&self, provider: Provider, enabled: bool) -> Result<()> {
+        self.config_set(&provider_key(provider), if enabled { "1" } else { "0" })
+    }
+
+    /// Na ordem fixa de `Provider::ALL`, para a pílula não trocar de lugar.
+    pub fn enabled_providers(&self) -> Vec<Provider> {
+        Provider::ALL
+            .into_iter()
+            .filter(|p| self.provider_enabled(*p))
+            .collect()
+    }
+
     pub fn config_get(&self, key: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         Ok(conn
@@ -367,6 +396,51 @@ mod tests {
 
     /// O backfill roda de novo a cada inicialização; reimportar não pode
     /// inflar os números.
+    /// Instalacao nova mostra tudo; quem nao tem uma das assinaturas desliga.
+    #[test]
+    fn provedores_comecam_todos_ligados() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.enabled_providers().len(), 3);
+        assert!(s.provider_enabled(Provider::Codex));
+    }
+
+    #[test]
+    fn desligar_um_provedor_o_tira_da_lista() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_provider_enabled(Provider::Codex, false).unwrap();
+
+        assert!(!s.provider_enabled(Provider::Codex));
+        let ativos = s.enabled_providers();
+        assert_eq!(ativos, vec![Provider::Claude, Provider::Cursor]);
+        assert!(!ativos.contains(&Provider::Codex));
+    }
+
+    /// A ordem e fixa para a pilula nao trocar de lugar entre ciclos.
+    #[test]
+    fn ordem_dos_ativos_e_estavel() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_provider_enabled(Provider::Claude, false).unwrap();
+        assert_eq!(s.enabled_providers(), vec![Provider::Cursor, Provider::Codex]);
+    }
+
+    #[test]
+    fn religar_devolve_o_provedor() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_provider_enabled(Provider::Cursor, false).unwrap();
+        s.set_provider_enabled(Provider::Cursor, true).unwrap();
+        assert!(s.provider_enabled(Provider::Cursor));
+    }
+
+    /// Desligar todos e um estado valido: a UI avisa em vez de ficar vazia.
+    #[test]
+    fn desligar_todos_e_permitido() {
+        let s = Store::open_in_memory().unwrap();
+        for p in Provider::ALL {
+            s.set_provider_enabled(p, false).unwrap();
+        }
+        assert!(s.enabled_providers().is_empty());
+    }
+
     #[test]
     fn reimportar_o_mesmo_evento_nao_duplica() {
         let s = Store::open_in_memory().unwrap();

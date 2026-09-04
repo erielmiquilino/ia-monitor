@@ -71,6 +71,16 @@ function headlineGauge(sample) {
 
 function renderPill(snapshot) {
   el.pillGauges.replaceChildren();
+  // Todos desligados e um estado valido; dizer isso e melhor que uma pilula
+  // vazia, que parece defeito.
+  if (snapshot.samples.length === 0) {
+    const vazio = document.createElement("span");
+    vazio.className = "empty-note";
+    vazio.setAttribute("data-tauri-drag-region", "");
+    vazio.textContent = "nenhum provedor ativo";
+    el.pillGauges.appendChild(vazio);
+    return;
+  }
   for (const sample of snapshot.samples) {
     const item = document.createElement("div");
     item.className = "pill-item";
@@ -146,6 +156,13 @@ function gaugeRow(gauge, burn) {
 
 function renderCard(snapshot) {
   el.providers.replaceChildren();
+
+  if (snapshot.samples.length === 0) {
+    const vazio = document.createElement("div");
+    vazio.className = "empty-note";
+    vazio.textContent = "Nenhum provedor ativo. Ligue um em Provedores, no menu da bandeja.";
+    el.providers.appendChild(vazio);
+  }
 
   for (const sample of snapshot.samples) {
     const block = document.createElement("div");

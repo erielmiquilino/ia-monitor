@@ -16,6 +16,23 @@ Clique na pílula para expandir o card:
   <img src="docs/card.png" alt="Card do IA Monitor com barras de Claude, Cursor e Codex" width="360">
 </p>
 
+## Ligar e desligar provedores
+
+No menu da bandeja, em **Provedores**, cada um tem sua marca. Quem não tem
+uma das três assinaturas desliga a que sobra e ela some da pílula, do card e
+do ícone.
+
+Não é só cosmético: um provedor desligado **para de ser consultado** e para de
+ter o histórico lido. Com o Codex desligado, por exemplo, o app deixa de
+varrer `~/.codex/sessions` a cada minuto.
+
+O que fica é o histórico já coletado — ele continua contando no painel de
+projetos, porque o consumo aconteceu de verdade. Desligar esconde o status
+atual, não reescreve o passado.
+
+Desligar todos é um estado válido: a UI diz "nenhum provedor ativo" em vez de
+aparecer vazia.
+
 ## Marcador de ritmo
 
 Cada barra traz um traço vertical mostrando **onde o consumo estaria se

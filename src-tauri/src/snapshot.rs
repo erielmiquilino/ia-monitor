@@ -178,7 +178,9 @@ pub fn build(store: &Store, samples: &[ProviderSample], now: DateTime<Utc>) -> S
         .map(|s| s.provider.label())
         .collect();
 
-    let status_text = if failed.is_empty() {
+    let status_text = if samples.is_empty() {
+        "nenhum provedor ativo — ligue algum na bandeja".to_string()
+    } else if failed.is_empty() {
         format!("{} provedores · dados locais", samples.len())
     } else {
         format!("indisponível: {}", failed.join(", "))
@@ -218,34 +220,24 @@ pub fn worst(samples: &[ProviderSample]) -> Severity {
         .unwrap_or(Severity::Unknown)
 }
 
-/// Fração representativa de cada provedor, na ordem fixa Claude/Cursor/Codex.
-/// Alimenta o desenho do ícone da bandeja.
+/// Fração representativa de cada provedor recebido, na ordem em que vêm.
+///
+/// Antes iterava `Provider::ALL` e devolvia uma barra cinza para o provedor
+/// ausente. Com o desligamento isso passou a mentir: um provedor que o
+/// usuário desligou não é "desconhecido", ele simplesmente não existe mais
+/// na tela.
 pub fn tray_fractions(samples: &[ProviderSample]) -> Vec<(Severity, f64)> {
-    Provider::ALL
+    samples
         .iter()
-        .map(|p| {
-            let sample = samples.iter().find(|s| s.provider == *p);
-            match sample {
+        .map(|s| {
+            // Sem medidor nenhum não há o que desenhar; com medidor antigo,
+            // desenhamos o que sabemos.
+            if s.gauges.is_empty() {
+                return (Severity::Unknown, 0.0);
+            }
+            match s.primary_gauge() {
+                Some(g) => (g.severity, g.fraction.unwrap_or(0.0)),
                 None => (Severity::Unknown, 0.0),
-                // Sem medidor nenhum não há o que desenhar; com medidor
-                // antigo, desenhamos o que sabemos.
-                Some(s) if s.gauges.is_empty() => (Severity::Unknown, 0.0),
-                Some(s) => {
-                    let g = s
-                        .gauges
-                        .iter()
-                        .filter(|g| g.fraction.is_some())
-                        .max_by(|a, b| {
-                            a.fraction
-                                .unwrap_or(0.0)
-                                .partial_cmp(&b.fraction.unwrap_or(0.0))
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                    match g {
-                        Some(g) => (g.severity, g.fraction.unwrap_or(0.0)),
-                        None => (Severity::Unknown, 0.0),
-                    }
-                }
             }
         })
         .collect()
@@ -300,18 +292,18 @@ mod tests {
         assert!(texto.contains("40m"), "{texto}");
     }
 
+    /// Uma barra por provedor recebido — provedor desligado nao aparece,
+    /// em vez de virar uma barra cinza de "desconhecido".
     #[test]
-    fn bandeja_recebe_um_valor_por_provedor_em_ordem_fixa() {
+    fn bandeja_desenha_so_os_provedores_recebidos() {
         let samples = vec![
-            sample(Provider::Claude, vec![gauge("a", 0.3, Severity::Normal)]),
-            sample(Provider::Cursor, vec![gauge("b", 0.8, Severity::Warn)]),
+            sample(Provider::Claude, vec![gauge("claude.session", 0.3, Severity::Normal)]),
+            sample(Provider::Cursor, vec![gauge("cursor.auto", 0.8, Severity::Warn)]),
         ];
         let f = tray_fractions(&samples);
-        assert_eq!(f.len(), 3, "sempre três posições, mesmo faltando provedor");
+        assert_eq!(f.len(), 2, "Codex desligado nao ocupa espaco no icone");
         assert_eq!(f[0].1, 0.3);
         assert_eq!(f[1].0, Severity::Warn);
-        // Codex ausente vira desconhecido em vez de zero enganoso.
-        assert_eq!(f[2].0, Severity::Unknown);
     }
 
     /// Dentro de um provedor, o medidor mais alto é o que representa.
@@ -331,8 +323,21 @@ mod tests {
     fn provedor_em_falha_nao_vira_barra_zerada() {
         let samples = vec![ProviderSample::failed(Provider::Cursor, "offline")];
         let f = tray_fractions(&samples);
-        assert_eq!(f[1].0, Severity::Unknown);
+        // Uma posição por amostra recebida, não uma por provedor existente.
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].0, Severity::Unknown);
         assert_eq!(worst(&samples), Severity::Unknown);
+    }
+
+    /// Desligar todos e valido: a UI precisa dizer isso em vez de aparecer
+    /// vazia, que pareceria defeito.
+    #[test]
+    fn sem_provedores_o_status_orienta_o_usuario() {
+        let store = ia_monitor_core::store::Store::open_in_memory().unwrap();
+        let view = build(&store, &[], Utc::now());
+        assert!(view.samples.is_empty());
+        assert!(view.status_text.contains("nenhum provedor ativo"), "{}", view.status_text);
+        assert!(tray_fractions(&[]).is_empty(), "icone sem barras");
     }
 
     #[test]
