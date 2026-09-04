@@ -9,14 +9,12 @@ name: release
 on:
   push:
     tags: ["v*"]
-  # Permite um ensaio sem publicar nada — foi assim que este workflow foi
-  # validado antes do primeiro uso real.
+  # Ensaio: compila e guarda os binários no run, sem publicar. Foi assim
+  # que este workflow foi validado antes do primeiro uso real.
+  #
+  # Publicar SÓ acontece por tag. Um dispatch publicando usaria `ref_name`
+  # como tag, o que criaria um release chamado "main".
   workflow_dispatch:
-    inputs:
-      publicar:
-        description: "Publicar release (desmarque para só testar o build)"
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -92,7 +90,7 @@ jobs:
           path: dist/*
 
       - name: Publicar release
-        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.publicar }}
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: IA Monitor ${{ steps.artefatos.outputs.versao }}
