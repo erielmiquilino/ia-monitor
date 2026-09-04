@@ -1,0 +1,104 @@
+# Publica o release ao empurrar uma tag `v*`.
+#
+#     git tag v0.1.1 && git push origin v0.1.1
+#
+# O build roda em Windows porque o alvo é Windows: o instalador NSIS e o
+# WebView2 não existem em outro runner.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Permite um ensaio sem publicar nada — foi assim que este workflow foi
+  # validado antes do primeiro uso real.
+  workflow_dispatch:
+    inputs:
+      publicar:
+        description: "Publicar release (desmarque para só testar o build)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Sem cache, cada release recompila reqwest, rusqlite e o Tauri inteiro.
+      - uses: Swatinem/rust-cache@v2
+
+      # A tag manda na versão publicada, mas quem nomeia o executável é o
+      # `tauri.conf.json`. Divergência aqui geraria um release "v0.2.0" com
+      # binários 0.1.0 dentro — falha cedo e explicitamente.
+      - name: Conferir versão contra a tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($tag -ne $conf) {
+            throw "tag v$tag nao bate com tauri.conf.json ($conf). Ajuste a versao antes de taguear."
+          }
+          "versao confirmada: $conf" | Write-Host
+
+      # Roda antes do build: publicar binário que não passa nos testes seria
+      # pior que não publicar. Inclui a checagem de sintaxe do frontend, que
+      # o build do Rust sozinho não pega.
+      - name: Testes
+        run: cargo test --workspace --locked
+
+      # Binário pronto em segundos; `cargo install` levaria minutos.
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Instalar tauri-cli
+        run: cargo binstall -y "tauri-cli@^2"
+
+      - name: Build
+        run: cargo tauri build
+
+      # Os nomes que o Tauri gera têm espaço e underscore
+      # ("IA Monitor_0.1.0_x64-setup.exe"). Renomear deixa o link de download
+      # legível e consistente entre releases.
+      - name: Preparar artefatos
+        id: artefatos
+        shell: pwsh
+        run: |
+          $versao = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $setup) { throw "instalador NSIS nao encontrado" }
+
+          Copy-Item $setup.FullName "dist/IA-Monitor-$versao-setup.exe"
+          Copy-Item target/release/ia-monitor.exe "dist/IA-Monitor-$versao-portable.exe"
+
+          "versao=$versao" >> $env:GITHUB_OUTPUT
+          Get-ChildItem dist | ForEach-Object {
+            "{0}  {1:N2} MB" -f $_.Name, ($_.Length / 1MB) | Write-Host
+          }
+
+      # No ensaio os binários ficam no run, para conferir sem criar release.
+      - name: Guardar artefatos do ensaio
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia-monitor-${{ steps.artefatos.outputs.versao }}
+          path: dist/*
+
+      - name: Publicar release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.publicar }}
+        uses: softprops/action-gh-release@v2
+        with:
+          name: IA Monitor ${{ steps.artefatos.outputs.versao }}
+          # A parte durável das notas (avisos de SmartScreen, WebView2 e o
+          # que o app le da maquina) vive no repo; o "What's Changed" o
+          # GitHub gera a partir dos commits.
+          body_path: .github/release-notes.md
+          generate_release_notes: true
+          files: dist/*
