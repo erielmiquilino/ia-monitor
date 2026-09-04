@@ -16,6 +16,24 @@ Clique na pílula para expandir o card:
   <img src="docs/card.png" alt="Card do IA Monitor com barras de Claude, Cursor e Codex" width="360">
 </p>
 
+## Contribuindo
+
+A `main` é protegida: PR obrigatório, o check `testes` precisa passar, e não
+se apaga nem se força push na branch. Quem contribui de fora abre um fork e
+manda PR.
+
+O dono do repositório passa direto — `enforce_admins` está desligado. Isso é
+deliberado: a proteção existe para evitar que alguém quebre a `main` sem
+revisão, não para criar burocracia num projeto de uma pessoa só. A
+contrapartida é honesta: com o bypass ligado, quem tem admin também escapa da
+trava de force-push.
+
+```
+git tag v0.1.1 && git push origin v0.1.1   # publica um release
+```
+
+O `ci.yml` roda em todo push e PR; o `release.yml` só em tag.
+
 ## Ligar e desligar provedores
 
 No menu da bandeja, em **Provedores**, cada um tem sua marca. Quem não tem
