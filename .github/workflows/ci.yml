@@ -1,0 +1,42 @@
+# Verificação a cada push na main e a cada pull request.
+#
+# Existe para a proteção de branch ter o que exigir: uma regra de "checks
+# obrigatórios" sem check nenhum é só decoração.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Push seguido de push na mesma branch cancela o run anterior — ninguém
+# precisa do resultado de um commit que já foi substituído.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  testes:
+    # O alvo é Windows e o código tem caminhos específicos da plataforma
+    # (`GetLastInputInfo`, `%LOCALAPPDATA%`, `state.vscdb`). Testar em Linux
+    # daria um verde que não significa nada.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A suíte inclui `node --check` no `app.js`. Sem isso, um erro de
+      # sintaxe no frontend passa pelo build do Rust e só aparece como uma
+      # janela em branco em runtime — já aconteceu.
+      - name: Testes
+        run: cargo test --workspace --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

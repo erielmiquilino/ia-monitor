@@ -24,10 +24,12 @@ const RPC_BASE: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService";
 /// de requisições ao Cursor sem acrescentar nada.
 const PLAN_CACHE_SECONDS: u64 = 6 * 3600;
 
+/// Momento da gravação e o plano guardado.
+type PlanoEmCache = Option<(std::time::Instant, Option<String>)>;
+
 /// Cache de processo: o coletor é criado a cada ciclo, então guardar no
 /// próprio struct não sobreviveria.
-static PLAN_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, Option<String>)>>> =
-    std::sync::OnceLock::new();
+static PLAN_CACHE: std::sync::OnceLock<std::sync::Mutex<PlanoEmCache>> = std::sync::OnceLock::new();
 
 fn cached_plan() -> Option<Option<String>> {
     let guard = PLAN_CACHE.get_or_init(Default::default).lock().ok()?;

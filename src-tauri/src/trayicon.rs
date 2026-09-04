@@ -82,7 +82,7 @@ mod tests {
     use super::*;
 
     fn pixels(img: &Image) -> Vec<[u8; 4]> {
-        img.rgba().chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+        img.rgba().as_chunks::<4>().0.to_vec()
     }
 
     #[test]
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn trilho_aparece_mesmo_sem_consumo() {
         let px = pixels(&draw(&[(Severity::Normal, 0.0)]));
-        assert!(px.iter().any(|p| *p == TRACK));
+        assert!(px.contains(&TRACK));
     }
 
     #[test]

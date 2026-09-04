@@ -7,6 +7,9 @@
 
 use chrono::{DateTime, Duration, Utc};
 
+/// Um ponto da série: instante e valor da fração naquele instante.
+pub type Point = (DateTime<Utc>, f64);
+
 /// Quanto a série precisa cair para ser considerada um reset, e não ruído.
 const RESET_DROP: f64 = 0.02;
 /// Abaixo disso a inclinação é chute: dois pontos colados não são tendência.
@@ -28,7 +31,7 @@ pub struct Burn {
 
 /// Recorta a série a partir do último reset. É o que separa o ciclo atual
 /// do passado já zerado.
-fn current_cycle(points: &[(DateTime<Utc>, f64)]) -> (&[(DateTime<Utc>, f64)], Option<DateTime<Utc>>) {
+fn current_cycle(points: &[Point]) -> (&[Point], Option<DateTime<Utc>>) {
     let mut start = 0usize;
     let mut reset_at = None;
     for i in 1..points.len() {
@@ -42,7 +45,7 @@ fn current_cycle(points: &[(DateTime<Utc>, f64)]) -> (&[(DateTime<Utc>, f64)], O
 
 /// Inclinação por mínimos quadrados, em unidades por hora. Menos sensível a
 /// um ponto fora da curva do que comparar apenas o primeiro com o último.
-fn slope_per_hour(points: &[(DateTime<Utc>, f64)]) -> Option<f64> {
+fn slope_per_hour(points: &[Point]) -> Option<f64> {
     let n = points.len() as f64;
     let t0 = points[0].0;
     let xs: Vec<f64> = points
@@ -67,7 +70,7 @@ fn slope_per_hour(points: &[(DateTime<Utc>, f64)]) -> Option<f64> {
 
 /// Calcula o ritmo de consumo do ciclo atual.
 pub fn burn(
-    points: &[(DateTime<Utc>, f64)],
+    points: &[Point],
     now: DateTime<Utc>,
     resets_at: Option<DateTime<Utc>>,
 ) -> Option<Burn> {
@@ -121,7 +124,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn series(values: &[(i64, f64)]) -> Vec<(DateTime<Utc>, f64)> {
+    fn series(values: &[(i64, f64)]) -> Vec<Point> {
         values
             .iter()
             .map(|(min, v)| (Utc.timestamp_opt(min * 60, 0).unwrap(), *v))

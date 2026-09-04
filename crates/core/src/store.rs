@@ -272,7 +272,7 @@ impl Store {
         provider: Provider,
         metric: &str,
         since: DateTime<Utc>,
-    ) -> Result<Vec<(DateTime<Utc>, f64)>> {
+    ) -> Result<Vec<crate::analytics::Point>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT ts, value FROM sample

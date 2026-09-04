@@ -189,10 +189,13 @@ fn clamp_to_bounds(
     (pos.0.clamp(min_x, max_x), pos.1.clamp(min_y, max_y))
 }
 
+/// Posição, tamanho e escala de um monitor, em coordenadas lógicas.
+type MonitorBounds = ((f64, f64), (f64, f64), f64);
+
 /// Monitor da janela em coordenadas lógicas: (posição, tamanho, escala).
 /// Janela ainda oculta não tem monitor "atual"; sem o fallback o clamp
 /// simplesmente não acontece e o card nasce fora da tela.
-fn monitor_bounds(window: &WebviewWindow) -> Option<((f64, f64), (f64, f64), f64)> {
+fn monitor_bounds(window: &WebviewWindow) -> Option<MonitorBounds> {
     let monitor = match window.current_monitor() {
         Ok(Some(m)) => m,
         _ => window.primary_monitor().ok().flatten()?,

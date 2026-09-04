@@ -200,7 +200,7 @@ impl CodexCollector {
         if files.is_empty() {
             return Err(anyhow!("nenhum rollout encontrado — rode o Codex ao menos uma vez"));
         }
-        files.sort_by(|a, b| b.0.cmp(&a.0));
+        files.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
 
         // O mais recente por mtime nem sempre tem o evento mais novo:
         // retomar uma sessão antiga atualiza o arquivo dela.
