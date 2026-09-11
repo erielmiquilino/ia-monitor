@@ -5,7 +5,9 @@
 //! token e quebraria o Claude Code do usuário.
 
 use crate::collect::{home_dir, Collector};
-use crate::model::{expected_fraction, reset_label, Gauge, Provider, ProviderSample, Severity};
+use crate::model::{
+    expected_fraction, local_moment, reset_label, Gauge, Provider, ProviderSample, Severity,
+};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -87,6 +89,22 @@ impl ClaudeCollector {
             .ok_or_else(|| anyhow!("home do usuário não encontrada"))?
             .join(".claude")
             .join(".credentials.json");
+
+        // Sem o arquivo, não existe outra fonte nesta máquina — e insistir em
+        // "rode o Claude Code para renovar" manda fazer o impossível em quem
+        // não tem o CLI instalado.
+        //
+        // O app desktop não substitui: o token daqui tem escopo
+        // `user:sessions:claude_code` e é o único que `/api/oauth/usage`
+        // aceita. O desktop autentica por sessão web e não deixa token legível
+        // (`%LOCALAPPDATA%\Claude` guarda apenas logs). Quem só usa o desktop
+        // desliga o provedor e a ferramenta para de reclamar.
+        if !path.exists() {
+            return Err(anyhow!(
+                "Claude Code não encontrado nesta máquina — desligue o Claude em Provedores, na bandeja"
+            ));
+        }
+
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("lendo {}", path.display()))?;
         let parsed: CredentialsFile = serde_json::from_str(&raw)?;
@@ -143,10 +161,18 @@ impl ClaudeCollector {
     async fn fetch(&self) -> Result<ProviderSample> {
         let (token, expires_at, plan) = Self::credentials()?;
 
+        // O token vale poucas horas, então "expirado" é comum e não indica
+        // problema. Já "expirado há dias" indica que o Claude Code não é usado
+        // nesta máquina — por isso a mensagem diz *quando*, e oferece as duas
+        // saídas em vez de só a que supõe o CLI instalado.
         if let Some(exp) = expires_at {
-            if exp < Utc::now().timestamp_millis() {
+            let now = Utc::now();
+            if exp < now.timestamp_millis() {
+                let quando = DateTime::from_timestamp_millis(exp)
+                    .map(|t| format!(" em {}", local_moment(t, now)))
+                    .unwrap_or_default();
                 return Err(anyhow!(
-                    "token expirado — rode o Claude Code uma vez para renovar"
+                    "token expirou{quando} — rode o Claude Code para renovar, ou desligue o Claude na bandeja"
                 ));
             }
         }

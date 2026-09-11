@@ -12,9 +12,18 @@ use model::{Provider, ProviderSample};
 
 /// Cliente HTTP compartilhado. Um só, para reaproveitar conexões TLS entre
 /// os polls — abrir handshake novo a cada minuto seria desperdício.
+///
+/// Confia nas raízes **do sistema além das embutidas**. Só as embutidas
+/// (padrão do rustls) falham em máquina com inspeção de TLS: o certificado
+/// que chega vem reassinado por uma CA corporativa que existe apenas no
+/// repositório do Windows. Antivírus e VPN fazem o mesmo. O sintoma é um
+/// `error sending request` em todos os provedores de uma vez, sem pista de
+/// que o problema é certificado — daí valer as duas origens.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
+        .tls_built_in_webpki_certs(true)
+        .tls_built_in_native_certs(true)
         .build()
         .expect("cliente HTTP")
 }

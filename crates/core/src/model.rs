@@ -158,6 +158,14 @@ pub struct ProviderSample {
 }
 
 impl ProviderSample {
+    /// Guarda a **cadeia inteira** do erro, não só a mensagem de topo.
+    ///
+    /// `to_string()` num `anyhow::Error` devolve apenas o primeiro nível, e é
+    /// por isso que uma falha de rede chegava na tela como
+    /// `error sending request for url (...)` — texto que não distingue DNS de
+    /// certificado, de proxy ou de firewall. A causa raiz fica no fim da
+    /// cadeia, que o `{:#}` preserva. Sem ela, um erro remoto é impossível de
+    /// diagnosticar sem acesso à máquina.
     pub fn failed(provider: Provider, err: impl std::fmt::Display) -> Self {
         Self {
             provider,
@@ -165,7 +173,7 @@ impl ProviderSample {
             gauges: Vec::new(),
             observed_at: Utc::now(),
             source_at: None,
-            error: Some(err.to_string()),
+            error: Some(format!("{err:#}")),
             retry_after: None,
         }
     }
@@ -484,6 +492,22 @@ mod model_tests {
     #[test]
     fn provedor_sem_medidores_nao_tem_principal() {
         assert!(amostra(Provider::Claude, vec![]).primary_gauge().is_none());
+    }
+
+    /// O erro na tela precisa carregar a causa raiz, nao so a mensagem de
+    /// topo. Um `error sending request for url (...)` sozinho nao distingue
+    /// DNS de certificado, de proxy ou de firewall, e deixou uma falha em
+    /// outra maquina sem diagnostico possivel.
+    #[test]
+    fn falha_preserva_a_causa_raiz_do_erro() {
+        let raiz = std::io::Error::other("invalid peer certificate: UnknownIssuer");
+        let err = anyhow::Error::new(raiz)
+            .context("error sending request for url (https://chatgpt.com/backend-api/codex/usage)");
+
+        let texto = ProviderSample::failed(Provider::Codex, err).error.unwrap();
+
+        assert!(texto.contains("error sending request"), "topo perdido: {texto}");
+        assert!(texto.contains("UnknownIssuer"), "causa raiz perdida: {texto}");
     }
 
     /// Datas construidas a partir do fuso local para o teste nao depender do
