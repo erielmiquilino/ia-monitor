@@ -35,14 +35,18 @@ pub struct Cadence {
 
 /// Quanto vale consultar cada fonte.
 ///
-/// Claude e Cursor custam requisição de rede e mudam na escala de minutos:
-/// consultar a cada minuto gasta cota sem acrescentar informação — numa
-/// janela de 5h, 3 minutos ainda dão resolução melhor que 1%. O Codex é
-/// leitura de arquivo local, então é barato e pode ser mais frequente.
+/// Os três custam requisição de rede e mudam na escala de minutos: consultar
+/// a cada minuto gasta cota sem acrescentar informação — numa janela de 5h, 3
+/// minutos ainda dão resolução melhor que 1%.
+///
+/// O Codex já foi mais rápido, quando era leitura de arquivo local. Desde que
+/// passou a consultar `/backend-api/codex/usage` ele entrou no mesmo ritmo
+/// dos outros: o barato virou caro.
 pub fn cadence(provider: Provider) -> Cadence {
     match provider {
-        Provider::Claude | Provider::Cursor => Cadence { active: 180, idle: 900 },
-        Provider::Codex => Cadence { active: 60, idle: 300 },
+        Provider::Claude | Provider::Cursor | Provider::Codex => {
+            Cadence { active: 180, idle: 900 }
+        }
     }
 }
 
@@ -192,13 +196,16 @@ mod tests {
         assert_eq!(daqui(next_due(Provider::Claude, now, 600, 0, None, None), now), 900);
     }
 
-    /// O Codex lê arquivo local: não custa requisição e pode ser frequente.
+    /// Todo provedor custa requisição hoje — o Codex passou a consultar a API
+    /// em vez de ler arquivo. Um ritmo mais curto que o de rede aqui voltaria
+    /// a gastar cota sem ganhar resolução, que foi o que gerou o 429.
     #[test]
-    fn codex_e_mais_frequente_que_os_de_rede() {
+    fn nenhum_provedor_consulta_mais_rapido_que_o_ritmo_de_rede() {
         let now = agora();
-        let codex = daqui(next_due(Provider::Codex, now, 0, 0, None, None), now);
-        let claude = daqui(next_due(Provider::Claude, now, 0, 0, None, None), now);
-        assert!(codex < claude, "codex={codex} claude={claude}");
+        for p in Provider::ALL {
+            let ativo = daqui(next_due(p, now, 0, 0, None, None), now);
+            assert!(ativo >= 180, "{p:?} consulta a cada {ativo}s");
+        }
     }
 
     /// O bug que motivou a reescrita: um 429 tem que gerar recuo longo, não

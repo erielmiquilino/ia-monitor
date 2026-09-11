@@ -31,7 +31,7 @@ pub async fn sample_one(
     match provider {
         Provider::Claude => ClaudeCollector::new(client.clone()).sample().await,
         Provider::Cursor => CursorCollector::new(client.clone()).sample().await,
-        Provider::Codex => CodexCollector::new(credit_baseline).sample().await,
+        Provider::Codex => CodexCollector::new(client.clone(), credit_baseline).sample().await,
     }
 }
 
@@ -40,8 +40,8 @@ pub async fn sample_one(
 pub async fn sample_all(credit_baseline: Option<f64>) -> Vec<ProviderSample> {
     let client = http_client();
     let claude = ClaudeCollector::new(client.clone());
-    let cursor = CursorCollector::new(client);
-    let codex = CodexCollector::new(credit_baseline);
+    let cursor = CursorCollector::new(client.clone());
+    let codex = CodexCollector::new(client, credit_baseline);
 
     let (a, b, c) = tokio::join!(claude.sample(), cursor.sample(), codex.sample());
     vec![a, b, c]

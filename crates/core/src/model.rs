@@ -191,18 +191,21 @@ impl ProviderSample {
     /// inativa era o limite por modelo (Fable) que aparecia — um número que
     /// o usuário não estava procurando.
     pub fn primary_gauge(&self) -> Option<&Gauge> {
-        let preferido = match self.provider {
+        // Lista, e não um id só, porque o Codex tem duas economias: a licença
+        // pessoal é governada pela janela de 5h e a corporativa pelo saldo de
+        // crédito. A ordem diz qual vale quando as duas existem.
+        let preferidos: &[&str] = match self.provider {
             // A janela de 5h é a que morde no dia a dia; semanal e por
             // modelo são contexto, e só aparecem no card.
-            Provider::Claude => "claude.session",
-            Provider::Cursor => "cursor.auto",
-            Provider::Codex => "codex.credits",
+            Provider::Claude => &["claude.session"],
+            Provider::Cursor => &["cursor.auto"],
+            Provider::Codex => &["codex.primary", "codex.credits"],
         };
-        self.gauges
+        preferidos
             .iter()
-            .find(|g| g.id == preferido && g.fraction.is_some())
-            // Plano sem o medidor preferido (Codex `plus` usa janelas): cai
-            // no de maior consumo, que é o que mais importa saber.
+            .find_map(|id| self.gauges.iter().find(|g| g.id == *id && g.fraction.is_some()))
+            // Sem nenhum dos preferidos: cai no de maior consumo, que é o que
+            // mais importa saber.
             .or_else(|| {
                 self.gauges
                     .iter()
@@ -455,15 +458,27 @@ mod model_tests {
         assert_eq!(cdx.primary_gauge().unwrap().id, "codex.credits");
     }
 
-    /// Plano sem o medidor preferido (Codex `plus` usa janelas): cai no de
-    /// maior consumo em vez de nao mostrar nada.
+    /// Mesma regra do Claude, agora no Codex: na licenca pessoal a pilula
+    /// mostra a janela de 5h mesmo quando a semanal esta mais cheia. E a de 5h
+    /// que decide se da para trabalhar agora.
     #[test]
-    fn sem_o_preferido_usa_o_de_maior_consumo() {
+    fn codex_com_janelas_prefere_a_de_5h() {
         let s = amostra(
             Provider::Codex,
             vec![medidor("codex.primary", 0.3, true), medidor("codex.secondary", 0.7, true)],
         );
-        assert_eq!(s.primary_gauge().unwrap().id, "codex.secondary");
+        assert_eq!(s.primary_gauge().unwrap().id, "codex.primary");
+    }
+
+    /// Sem nenhum dos preferidos, cai no de maior consumo em vez de nao
+    /// mostrar nada.
+    #[test]
+    fn sem_o_preferido_usa_o_de_maior_consumo() {
+        let s = amostra(
+            Provider::Codex,
+            vec![medidor("codex.outro", 0.3, true), medidor("codex.novo", 0.7, true)],
+        );
+        assert_eq!(s.primary_gauge().unwrap().id, "codex.novo");
     }
 
     #[test]

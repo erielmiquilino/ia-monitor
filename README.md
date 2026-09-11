@@ -42,7 +42,7 @@ do ícone.
 
 Não é só cosmético: um provedor desligado **para de ser consultado** e para de
 ter o histórico lido. Com o Codex desligado, por exemplo, o app deixa de
-varrer `~/.codex/sessions` a cada minuto.
+consultar a API da OpenAI e de varrer `~/.codex/sessions`.
 
 O que fica é o histórico já coletado — ele continua contando no painel de
 projetos, porque o consumo aconteceu de verdade. Desligar esconde o status
@@ -71,7 +71,7 @@ estimada:
 | Fonte | Como a janela é conhecida |
 |---|---|
 | Cursor | exata — a resposta traz `billingCycleStart` **e** `billingCycleEnd` |
-| Codex (plano com janela) | exata — `window_minutes` vem no evento |
+| Codex (licença de janela) | exata — `limit_window_seconds` vem na resposta |
 | Claude | pelo vocabulário da própria API: os campos se chamam `five_hour` e `seven_day`, e `group` separa `session` de `weekly` |
 | Codex (créditos) | **não existe** — saldo não reseta, então não há marcador |
 
@@ -89,17 +89,23 @@ custando caro".
 |---|---|---|---|
 | Claude Max 5x | % de janela (5h e 7d) | sim, `resets_at` | servidor |
 | Cursor Team | % do ciclo, 2 baldes | sim, `billingCycleEnd` | servidor |
-| Codex business | saldo de créditos | não (recarga manual) | derivada de baseline |
+| Codex Plus/Pro | % de janela (5h e 7d) | sim, `reset_at` | servidor |
+| Codex Business | saldo de créditos | não (recarga manual) | derivada de baseline |
 
-**Regra de ouro: nunca recalcular o que o servidor já calculou.** Para Claude
-e Cursor a barra é o número que a fonte devolve, então a UI acompanha
-mudanças de política de cota sem alteração de código. Só o Codex exige
-derivação, porque saldo de crédito não tem teto declarado.
+O Codex aparece duas vezes de propósito: é o único provedor onde **a licença
+troca a unidade da conta**. Assinatura pessoal é governada por janela;
+assinatura corporativa, por saldo de crédito.
+
+**Regra de ouro: nunca recalcular o que o servidor já calculou.** A barra é o
+número que a fonte devolve, então a UI acompanha mudanças de política de cota
+sem alteração de código. A única exceção é o saldo de crédito, que não tem
+teto declarado e por isso precisa de uma baseline.
 
 ## De onde vêm os dados
 
-Nenhuma das três contas precisou de chave de admin. As duas corporativas
-(Cursor e Codex) expõem o consumo do próprio usuário.
+Nenhuma conta precisou de chave de admin — nem as corporativas, que expõem o
+consumo do próprio usuário sem passar pelo painel do time. Vale para os dois
+lados: a mesma leitura funciona numa assinatura pessoal.
 
 ### Claude Code — tempo real
 
@@ -133,27 +139,49 @@ Medido em ~0 ms, sem cópia e sem lock.
 > O Cursor **não guarda contagem de token localmente** — os registros de
 > conversa no `state.vscdb` têm `tokenCount` zerado. A API é o único caminho.
 
-### Codex — última leitura conhecida
+### Codex — tempo real, com o disco de reserva
 
-Tail de `~/.codex/sessions/AAAA/MM/DD/rollout-*.jsonl`. O servidor devolve o
-estado da cota a cada turno e o CLI grava em disco:
+`GET https://chatgpt.com/backend-api/codex/usage`
+Token de `~/.codex/auth.json` → `tokens.access_token`. O header
+`chatgpt-account-id` é **obrigatório**: sem ele a resposta é 403.
 
 ```json
-{"type":"event_msg","payload":{"type":"token_count",
-  "info":{"last_token_usage":{...}},
-  "rate_limits":{"credits":{"balance":"820.00"},"plan_type":"business"}}}
+{"plan_type":"plus",
+ "rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,
+                                 "reset_at":1788895096},
+               "secondary_window":{"used_percent":0,"limit_window_seconds":604800}},
+ "credits":{"has_credits":false,"balance":"0"},
+ "rate_limit_reached_type":null}
 ```
 
-Por isso o dado é "última leitura conhecida", não tempo real — e a UI **diz a
-idade** em vez de fingir que é ao vivo. O parser cobre os dois formatos:
-plano por crédito (`business`) e plano por janela (`plus`, com
-`primary`/`secondary`).
+> Isto mede a cota do **Codex**, não a do chat do ChatGPT. Os limites do chat
+> ficam atrás da sessão web e devolvem 403 para o token do Codex.
 
-*Pendência conhecida:* os métodos `account/rateLimits/read` e
-`account/usage/read` existem no protocolo do `codex app-server` (veja
-`codex app-server generate-json-schema -o <dir>` → `v2/GetAccountRateLimitsResponse.json`),
-mas não respondem ao handshake v1. Se alguém destravar a negociação v2, o
-Codex vira tempo real como os outros.
+**Qual licença é essa?** A resposta está em `~/.codex/auth.json`, sem rede: o
+`id_token` traz `chatgpt_plan_type` — e, em assinatura pessoal,
+`chatgpt_subscription_active_until`, que vira o "até 08/10" ao lado do nome do
+plano. Trocar de plano reescreve o arquivo, então a leitura nunca envelhece.
+
+Isso é o que decide quais barras existem:
+
+| Licença | Barras | O bloco que **não** vira barra |
+|---|---|---|
+| Plus / Pro | Sessão 5h + Semana | `credits`, que vem zerado |
+| Business / Enterprise | Créditos | `primary`/`secondary`, que vêm nulos |
+
+O `credits` zerado do Plus é uma armadilha real: ele existe na resposta, e a
+regra ingênua "tem campo, mostra barra" pintaria 100% de consumo com a cota
+intacta. Por isso o saldo só vira medidor quando de fato governa — tem
+crédito, é ilimitado, ou o bloqueio veio por crédito.
+
+**Reserva.** Sem rede ou com token vencido, o app cai no tail de
+`~/.codex/sessions/AAAA/MM/DD/rollout-*.jsonl`, onde o CLI grava a cota que o
+servidor devolveu a cada turno, e a UI passa a **dizer a idade** do dado.
+Só que o rollout guarda o plano de quando foi gravado: quem migrou de
+business para plus tem, no último arquivo, um saldo de crédito que não governa
+mais nada. Então o recuo só é aceito quando o plano gravado bate com o plano
+de agora — caso contrário a ferramenta mostraria a cota da assinatura errada
+com cara de dado atual.
 
 ## Arquitetura
 
@@ -175,14 +203,16 @@ ui/                   HTML/CSS/JS puro, sem bundler
   segunda passada lê 0 bytes.
 - **Ler o `state.vscdb` sem copiar.** `file:///...?mode=ro`, ~0 ms.
 - **Ritmo adaptativo e por provedor.** Cada fonte tem seu próprio relógio:
-  180 s ativo / 900 s ocioso para Claude e Cursor (custam requisição), 60 s /
-  300 s para o Codex (lê arquivo local). Mais recuo exponencial por falha,
+  180 s ativo / 900 s ocioso, porque os três custam requisição — o Codex era
+  mais rápido quando lia arquivo local, e entrou no mesmo ritmo ao virar
+  consulta de API. Mais recuo exponencial por falha,
   recuo bem maior em 429 respeitando `Retry-After`, e um ciclo extra logo
   após cada reset conhecido — que é quando o número muda.
 - **Cota de requisição é recurso.** O `GetPlanInfo` do Cursor fica em cache
   por 6 h, e uma trava entre execuções impede que abrir e fechar o app em
-  sequência vire rajada. No total, 42 requisições/hora contra as 186 da
-  primeira versão.
+  sequência vire rajada. Em uso ativo dá ~62 requisições/hora nos três
+  provedores — eram 186 só em Claude e Cursor na primeira versão, antes de o
+  Codex passar a consultar API.
 - **Uma janela só.** Pílula e card são a mesma janela redimensionada, não
   dois webviews.
 - **UI sem timer.** O backend emite `snapshot` quando o dado muda.
@@ -244,8 +274,8 @@ A ferramenta lê credenciais corporativas do disco. As regras:
 
 - Tokens **nunca** são persistidos: lidos sob demanda, só em memória,
   limpos com `zeroize`.
-- Rede restrita a `api.anthropic.com`, `api2.cursor.sh` e `cursor.com`.
-  Zero telemetria.
+- Rede restrita a `api.anthropic.com`, `api2.cursor.sh`, `cursor.com` e
+  `chatgpt.com`. Zero telemetria.
 - Somente leitura do próprio consumo. **Nunca** usa o `refresh_token` do
   Codex — a rotação invalidaria o token do CLI.
 - Token do Claude expirado não é renovado por conta própria: a UI avisa para
