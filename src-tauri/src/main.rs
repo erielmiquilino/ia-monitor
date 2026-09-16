@@ -12,8 +12,10 @@ use alerts::AlertState;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ia_monitor_core::model::{Provider, ProviderSample};
 use ia_monitor_core::store::Store;
+use serde::Serialize;
 use snapshot::SnapshotView;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -46,6 +48,18 @@ struct AppState {
     /// Acorda o laço fora do ritmo normal. Sem isto, ligar ou desligar um
     /// provedor só apareceria no próximo ciclo — até um minuto depois.
     wake: Arc<tokio::sync::Notify>,
+    /// Pedido de coleta imediata, vindo da UI ou da bandeja. Lido e zerado no
+    /// topo do ciclo; `wake` é o que interrompe o sono para ele ser lido agora.
+    force: AtomicBool,
+}
+
+impl AppState {
+    /// Marca uma coleta imediata e acorda o laço. Não consulta nada aqui: o
+    /// laço é o único dono do ritmo e das travas de 429.
+    fn pedir_coleta(&self) {
+        self.force.store(true, Ordering::Relaxed);
+        self.wake.notify_one();
+    }
 }
 
 fn provider_menu_id(p: Provider) -> String {
@@ -64,12 +78,15 @@ fn same_spot(a: (f64, f64), b: (f64, f64)) -> bool {
 
 /// A pílula e o card são a MESMA janela em dois tamanhos. Um segundo webview
 /// custaria dezenas de MB para mostrar o mesmo dado.
+///
+/// Devolve se uma coleta foi pedida junto: é o que permite à UI não girar o
+/// ⟳ quando a coleta está pausada e nada vai acontecer.
 #[tauri::command]
 fn set_expanded(
     window: WebviewWindow,
     state: tauri::State<'_, Arc<AppState>>,
     expanded: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     // Ao recolher, o tamanho de origem é o que a janela tem AGORA, não o
     // piso `CARD`: o card cresceu para caber o conteúdo.
     let atual = logical_size(&window).unwrap_or(CARD);
@@ -105,7 +122,16 @@ fn set_expanded(
     let _ = state
         .store
         .config_set(EXPANDED_KEY, if expanded { "1" } else { "0" });
-    Ok(())
+
+    // Expandir o card é um pedido explícito de "quero ver o número de agora".
+    // Sai daqui, e não de um segundo `invoke` no JS, porque este caminho já
+    // passa pelo backend — e porque o piso entre coletas vive no laço, não na
+    // UI.
+    let pediu = expanded && !*state.paused.lock().unwrap();
+    if pediu {
+        state.pedir_coleta();
+    }
+    Ok(pediu)
 }
 
 /// Ajusta a altura do card ao conteúdo, dentro do que a tela comporta.
@@ -141,6 +167,33 @@ fn start_expanded(state: tauri::State<'_, Arc<AppState>>) -> bool {
 #[tauri::command]
 fn current_snapshot(state: tauri::State<'_, Arc<AppState>>) -> Option<SnapshotView> {
     state.latest.lock().ok()?.clone()
+}
+
+/// Resposta ao pedido de coleta imediata.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RefreshAck {
+    started: bool,
+    /// Preenchido só quando não começou: a UI mostra o motivo em vez de girar
+    /// um ícone que não representa trabalho nenhum.
+    message: Option<String>,
+}
+
+/// Coleta imediata a pedido do usuário.
+///
+/// Um 429 em curso não precisa de tratamento aqui: o snapshot que chega logo
+/// em seguida já diz "nova tentativa em Xm". Repetir esse texto no retorno
+/// criaria uma segunda definição da mesma frase.
+#[tauri::command]
+fn refresh_now(state: tauri::State<'_, Arc<AppState>>) -> RefreshAck {
+    if *state.paused.lock().unwrap() {
+        return RefreshAck {
+            started: false,
+            message: Some("coleta pausada — retome na bandeja".into()),
+        };
+    }
+    state.pedir_coleta();
+    RefreshAck { started: true, message: None }
 }
 
 /// Persiste sempre a posição equivalente da **pílula**, em coordenadas
@@ -367,6 +420,12 @@ struct PollState {
     /// da tela — mostramos o valor anterior com a idade dele.
     last_good: Option<ProviderSample>,
     last_error: Option<String>,
+    /// Última tentativa, bem-sucedida ou não. É o que dá o piso entre coletas
+    /// forçadas; vem do banco no arranque para o piso sobreviver a um restart.
+    last_attempt: Option<DateTime<Utc>>,
+    /// Até quando este provedor está de castigo por 429. É a única trava que
+    /// um pedido manual de coleta não pode furar.
+    rate_limited_until: Option<DateTime<Utc>>,
 }
 
 /// Espaçamento mínimo entre coletas de um mesmo provedor **entre execuções**.
@@ -375,6 +434,13 @@ struct PollState {
 /// fechar o app em sequência gera uma rajada de requisições que nenhuma
 /// cadência interna evita — foi o que provavelmente rendeu o 429.
 const RESTART_GAP_SECONDS: i64 = 30;
+
+/// Espaçamento mínimo entre coletas **forçadas** do mesmo provedor.
+///
+/// Expandir e recolher o card em sequência é um gesto barato para o usuário e
+/// caro para a cota de requisições — é a mesma rajada que
+/// `RESTART_GAP_SECONDS` evita entre execuções, só que dentro de uma.
+const FORCE_MIN_GAP_SECONDS: i64 = 30;
 
 fn last_poll_key(p: Provider) -> String {
     format!("poll.last:{}", p.as_str())
@@ -398,7 +464,33 @@ fn cursor_history_due(store: &Store, now: DateTime<Utc>) -> DateTime<Utc> {
 
 impl PollState {
     fn new(now: DateTime<Utc>) -> Self {
-        Self { due: now, failures: 0, last_good: None, last_error: None }
+        Self {
+            due: now,
+            failures: 0,
+            last_good: None,
+            last_error: None,
+            last_attempt: None,
+            rate_limited_until: None,
+        }
+    }
+
+    /// Antecipa a próxima coleta a pedido do usuário.
+    ///
+    /// Fura a cadência normal e o recuo por falha comum — que é justamente o
+    /// ponto: quem clica em atualizar acabou de reconectar a VPN ou quer ver o
+    /// número agora. Nunca fura o castigo por 429, porque insistir contra um
+    /// limite estourado piora o próprio problema, nem o piso entre coletas. E
+    /// nunca **adia**: um provedor já vencido continua vencido.
+    fn antecipa(&mut self, now: DateTime<Utc>) {
+        if self.rate_limited_until.is_some_and(|t| t > now) {
+            return;
+        }
+        let piso = self
+            .last_attempt
+            .map(|t| t + ChronoDuration::seconds(FORCE_MIN_GAP_SECONDS))
+            .unwrap_or(now)
+            .max(now);
+        self.due = self.due.min(piso);
     }
 
     /// Estado inicial que respeita a última coleta da execução anterior.
@@ -414,7 +506,7 @@ impl PollState {
             Some(t) => now.max(t + ChronoDuration::seconds(RESTART_GAP_SECONDS)),
             None => now,
         };
-        Self { due, ..Self::new(now) }
+        Self { due, last_attempt: anterior, ..Self::new(now) }
     }
 }
 
@@ -462,6 +554,17 @@ async fn run_loop(app: AppHandle, state: Arc<AppState>) {
         let ativos = state.store.enabled_providers();
         poll.retain(|p, _| ativos.contains(p));
 
+        // Pedido manual de coleta: antecipa o relógio de quem pode ser
+        // consultado agora. Quem ainda não tem estado entra pelo `restored`
+        // logo abaixo, que já respeita o mesmo espaçamento.
+        if state.force.swap(false, Ordering::Relaxed) {
+            for p in ativos.iter() {
+                if let Some(st) = poll.get_mut(p) {
+                    st.antecipa(now);
+                }
+            }
+        }
+
         for provider in ativos.iter().copied() {
             poll.entry(provider)
                 .or_insert_with(|| PollState::restored(&state.store, provider, now));
@@ -477,10 +580,12 @@ async fn run_loop(app: AppHandle, state: Arc<AppState>) {
                 .store
                 .config_set(&last_poll_key(provider), &now.timestamp().to_string());
             let st = poll.get_mut(&provider).expect("estado do provedor");
+            st.last_attempt = Some(now);
 
             if amostra.error.is_none() {
                 st.failures = 0;
                 st.last_error = None;
+                st.rate_limited_until = None;
                 st.due = scheduler::next_due(
                     provider,
                     now,
@@ -505,6 +610,8 @@ async fn run_loop(app: AppHandle, state: Arc<AppState>) {
                     amostra.retry_after,
                     None,
                 );
+                // Só o 429 vira castigo intocável; uma falha de rede não.
+                st.rate_limited_until = amostra.is_rate_limited().then_some(st.due);
             }
         }
 
@@ -593,7 +700,13 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        .invoke_handler(tauri::generate_handler![set_expanded, current_snapshot, start_expanded, fit_card])
+        .invoke_handler(tauri::generate_handler![
+            set_expanded,
+            current_snapshot,
+            start_expanded,
+            fit_card,
+            refresh_now
+        ])
         .setup(|app| {
             let store = Arc::new(Store::open_default()?);
             let state = Arc::new(AppState {
@@ -603,6 +716,7 @@ fn main() {
                 paused: Mutex::new(false),
                 anchor: Mutex::new(None),
                 wake: Arc::new(tokio::sync::Notify::new()),
+                force: AtomicBool::new(false),
             });
             app.manage(state.clone());
 
@@ -644,6 +758,9 @@ fn main() {
             }
 
             let abrir = MenuItemBuilder::with_id("abrir", "Mostrar").build(app)?;
+            // Serve para quem deixa a janela escondida: é o único caminho de
+            // coleta imediata que não exige abrir o card.
+            let atualizar = MenuItemBuilder::with_id("atualizar", "Atualizar agora").build(app)?;
             let pausar = CheckMenuItemBuilder::with_id("pausar", "Pausar coleta")
                 .checked(false)
                 .build(app)?;
@@ -671,7 +788,7 @@ fn main() {
                 .build(app)?;
             let sair = MenuItemBuilder::with_id("sair", "Sair").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&abrir, &pausar])
+                .items(&[&abrir, &atualizar, &pausar])
                 .item(&provedores)
                 .items(&[&autostart])
                 .separator()
@@ -686,6 +803,14 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "abrir" => show_window(app),
+                    // Com a coleta pausada o clique não faz nada: a bandeja
+                    // não tem onde dizer o motivo, e furar a pausa seria
+                    // desobedecer o próprio menu.
+                    "atualizar" => {
+                        if !*tray_state.paused.lock().unwrap() {
+                            tray_state.pedir_coleta();
+                        }
+                    }
                     "pausar" => {
                         let mut paused = tray_state.paused.lock().unwrap();
                         *paused = !*paused;
@@ -878,6 +1003,7 @@ mod tests {
             failures: 1,
             last_good: Some(bom(agora - ChronoDuration::minutes(4))),
             last_error: Some("limite de requisições atingido".into()),
+            ..PollState::new(agora)
         };
         let s = display_sample(Provider::Claude, &st, agora);
 
@@ -899,6 +1025,7 @@ mod tests {
             failures: 1,
             last_good: None,
             last_error: Some("sem rede".into()),
+            ..PollState::new(agora)
         };
         let s = display_sample(Provider::Claude, &st, agora);
         assert!(s.gauges.is_empty());
@@ -913,6 +1040,7 @@ mod tests {
             failures: 0,
             last_good: Some(bom(agora)),
             last_error: None,
+            ..PollState::new(agora)
         };
         let s = display_sample(Provider::Claude, &st, agora);
         assert!(s.error.is_none());
@@ -950,5 +1078,92 @@ mod tests {
     fn mesma_posicao_tolera_arredondamento() {
         assert!(same_spot((10.0, 10.0), (10.9, 9.2)));
         assert!(!same_spot((10.0, 10.0), (14.0, 10.0)));
+    }
+
+    /// O piso entre coletas forçadas em forma de estado: facilita montar um
+    /// `PollState` no ponto exato que cada teste precisa.
+    fn estado(due_em: i64, tentou_ha: Option<i64>, now: DateTime<Utc>) -> PollState {
+        PollState {
+            due: now + ChronoDuration::seconds(due_em),
+            last_attempt: tentou_ha.map(|s| now - ChronoDuration::seconds(s)),
+            ..PollState::new(now)
+        }
+    }
+
+    /// O caso comum: provedor em cadência normal, clique no ⟳, coleta agora.
+    #[test]
+    fn coleta_forcada_antecipa_a_cadencia_normal() {
+        let now = Utc::now();
+        let mut st = estado(170, Some(60), now);
+        st.antecipa(now);
+        assert_eq!(st.due, now, "o pedido manual precisa valer para agora");
+    }
+
+    /// O 429 é a única trava que o pedido manual não fura: insistir contra um
+    /// limite recém-estourado transforma um 429 pontual em permanente.
+    #[test]
+    fn coleta_forcada_respeita_o_castigo_por_429() {
+        let now = Utc::now();
+        let mut st = estado(600, Some(30), now);
+        st.rate_limited_until = Some(now + ChronoDuration::seconds(600));
+        let antes = st.due;
+        st.antecipa(now);
+        assert_eq!(st.due, antes, "429 em curso não pode ser furado");
+    }
+
+    /// Passado o castigo, o provedor volta a aceitar pedido manual.
+    #[test]
+    fn coleta_forcada_volta_a_valer_depois_do_429() {
+        let now = Utc::now();
+        let mut st = estado(120, Some(60), now);
+        st.rate_limited_until = Some(now - ChronoDuration::seconds(1));
+        st.antecipa(now);
+        assert_eq!(st.due, now);
+    }
+
+    /// Expandir e recolher em sequência não pode virar rajada: a segunda
+    /// coleta espera o piso contado da última tentativa, não de agora.
+    #[test]
+    fn coleta_forcada_respeita_o_piso_entre_tentativas() {
+        let now = Utc::now();
+        let mut st = estado(175, Some(5), now);
+        st.antecipa(now);
+        assert_eq!(
+            st.due,
+            now + ChronoDuration::seconds(FORCE_MIN_GAP_SECONDS - 5),
+            "o piso conta da última tentativa"
+        );
+    }
+
+    /// Recuo por falha comum (rede caída, VPN fora) existe para não martelar
+    /// sozinho — mas quando o usuário pede, pedir de novo é exatamente o certo.
+    #[test]
+    fn coleta_forcada_fura_o_recuo_por_falha_comum() {
+        let now = Utc::now();
+        let mut st = estado(900, Some(90), now);
+        st.failures = 3;
+        st.antecipa(now);
+        assert_eq!(st.due, now, "falha comum não é castigo, é só cautela");
+    }
+
+    /// Antecipar nunca pode empurrar para frente: um provedor já vencido
+    /// continua vencido, mesmo com o clique chegando logo depois de uma
+    /// tentativa.
+    #[test]
+    fn coleta_forcada_nunca_adia() {
+        let now = Utc::now();
+        let mut st = estado(-30, Some(2), now);
+        let antes = st.due;
+        st.antecipa(now);
+        assert_eq!(st.due, antes, "o que já venceu não pode ser adiado");
+    }
+
+    /// Sem tentativa anterior (primeira execução) não há piso a respeitar.
+    #[test]
+    fn coleta_forcada_sem_tentativa_anterior_vale_agora() {
+        let now = Utc::now();
+        let mut st = estado(30, None, now);
+        st.antecipa(now);
+        assert_eq!(st.due, now);
     }
 }

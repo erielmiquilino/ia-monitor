@@ -159,6 +159,26 @@ body {
   color: var(--fg);
 }
 
+/* Gira enquanto a coleta pedida à mão está em andamento. */
+.icon-btn.spinning {
+  animation: girar 0.9s linear infinite;
+  color: var(--fg);
+}
+
+@keyframes girar {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Quem pediu menos movimento continua tendo o retorno visual, sem a rotação. */
+@media (prefers-reduced-motion: reduce) {
+  .icon-btn.spinning {
+    animation: none;
+    opacity: 0.45;
+  }
+}
+
 .providers {
   padding: 4px 10px 8px;
 }
