@@ -17,6 +17,7 @@ const el = {
   updated: document.getElementById("updated"),
   status: document.getElementById("status"),
   collapse: document.getElementById("collapse"),
+  refresh: document.getElementById("refresh"),
 };
 
 let expanded = false;
@@ -256,6 +257,41 @@ function render(snapshot) {
   }
 }
 
+/** O giro do ⟳ acompanha uma coleta em andamento.
+ *
+ *  Quem desliga é o próximo `snapshot`: o backend emite um ao fim de toda
+ *  iteração, então a confirmação sempre chega. O `setTimeout` é só a rede de
+ *  segurança para o caso de o evento não vir — é um disparo único, não o timer
+ *  de polling que o cabeçalho deste arquivo dispensa.
+ */
+let destravaGiro = null;
+
+function girando(ligado) {
+  el.refresh.classList.toggle("spinning", ligado);
+  if (destravaGiro) {
+    clearTimeout(destravaGiro);
+    destravaGiro = null;
+  }
+  if (ligado) destravaGiro = setTimeout(() => girando(false), 15000);
+}
+
+async function atualizarAgora() {
+  girando(true);
+  try {
+    const ack = await invoke("refresh_now");
+    if (!ack?.started) {
+      girando(false);
+      // Vive até o próximo snapshot, e é o certo: é um aviso do momento, não
+      // um estado da coleta.
+      text(el.status, ack?.message);
+    }
+  } catch {
+    // Sem isto o ícone giraria para sempre quando o comando falha. Os outros
+    // `invoke` podem engolir o erro em silêncio; este não.
+    girando(false);
+  }
+}
+
 async function setExpanded(next) {
   if (expanded === next) return;
   expanded = next;
@@ -264,7 +300,13 @@ async function setExpanded(next) {
   // O redimensionamento é do backend: é a mesma janela mudando de tamanho,
   // não um segundo webview.
   if (!next) document.body.classList.remove("scrolls");
-  await invoke("set_expanded", { expanded: next });
+  // Expandir dispara uma coleta no backend; recolher esconde o card e não
+  // deixa giro órfão para trás.
+  girando(next);
+  // O backend diz se a coleta saiu mesmo: com a coleta pausada não sai
+  // snapshot nenhum, e o giro ficaria mentindo até o destrave de segurança.
+  const pediu = await invoke("set_expanded", { expanded: next });
+  if (next && !pediu) girando(false);
   if (latest) render(latest);
 }
 
@@ -274,12 +316,16 @@ el.pill.addEventListener("click", (e) => {
   setExpanded(true);
 });
 el.collapse.addEventListener("click", () => setExpanded(false));
+el.refresh.addEventListener("click", atualizarAgora);
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && expanded) setExpanded(false);
 });
 
-listen("snapshot", (event) => render(event.payload));
+listen("snapshot", (event) => {
+  girando(false);
+  render(event.payload);
+});
 
 /** Aplica o modo sem chamar o backend: na abertura a janela já vem no
  *  tamanho certo, e redimensioná-la de novo causaria um piscar. */
