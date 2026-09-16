@@ -1,10 +1,20 @@
-//! Claude Code — API OAuth oficial. Fonte autoritativa, em tempo real.
+//! Claude — API OAuth oficial. Fonte autoritativa, em tempo real.
 //!
-//! O token sai de `~/.claude/.credentials.json`, escrito e renovado pelo
-//! próprio CLI. Nunca renovamos por conta própria: o refresh rotaciona o
-//! token e quebraria o Claude Code do usuário.
+//! A cota lida aqui é **da conta**, não de um aplicativo: claude.ai, o
+//! Claude Desktop e o Claude Code consomem a mesma janela de 5h e o mesmo
+//! limite semanal. O token é só a chave de leitura — por isso duas fontes
+//! servem, e por isso o número não muda conforme qual delas foi usada.
+//!
+//! São duas porque envelhecem de formas diferentes. O `.credentials.json`
+//! do Claude Code vale poucas horas e só o próprio CLI o renova, então ele
+//! seca em quem parou de usar o CLI. O Claude Desktop guarda o token
+//! cifrado (ver `claude_desktop`) e o mantém fresco enquanto for aberto —
+//! por isso ele vem primeiro.
+//!
+//! Nunca renovamos nada por conta própria: o refresh rotaciona o token e
+//! quebraria o aplicativo de onde ele veio.
 
-use crate::collect::{home_dir, Collector};
+use crate::collect::{claude_desktop, home_dir, Collector};
 use crate::model::{
     expected_fraction, local_moment, reset_label, Gauge, Provider, ProviderSample, Severity,
 };
@@ -74,6 +84,50 @@ struct UsageResponse {
     limits: Vec<LimitEntry>,
 }
 
+/// Onde a credencial foi lida. O Desktop vem primeiro porque é a fonte que
+/// se mantém fresca sozinha; o CLI é a reserva de quem não usa o Desktop.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CredSource {
+    Desktop,
+    Cli,
+}
+
+impl CredSource {
+    fn nome(self) -> &'static str {
+        match self {
+            CredSource::Desktop => "Claude Desktop",
+            CredSource::Cli => "Claude Code",
+        }
+    }
+}
+
+struct ClaudeCreds {
+    token: Zeroizing<String>,
+    /// Epoch em milissegundos.
+    expires_at: Option<i64>,
+    plan: Option<String>,
+    fonte: CredSource,
+}
+
+impl ClaudeCreds {
+    /// `Some(texto)` quando o token já venceu.
+    ///
+    /// O texto diz *quando*: o token vale poucas horas, então "expirado" é
+    /// rotina e não indica problema — mas "expirado há dias" indica que
+    /// aquele aplicativo não é mais usado nesta máquina, e é isso que o
+    /// usuário precisa saber para escolher qual abrir.
+    fn vencimento(&self, agora: DateTime<Utc>) -> Option<String> {
+        let exp = self.expires_at?;
+        if exp >= agora.timestamp_millis() {
+            return None;
+        }
+        let quando = DateTime::from_timestamp_millis(exp)
+            .map(|t| format!(" em {}", local_moment(t, agora)))
+            .unwrap_or_default();
+        Some(format!("token expirou{quando}"))
+    }
+}
+
 pub struct ClaudeCollector {
     client: reqwest::Client,
     cli_version: String,
@@ -84,37 +138,76 @@ impl ClaudeCollector {
         Self { client, cli_version: "2.1.246".into() }
     }
 
-    fn credentials() -> Result<(Zeroizing<String>, Option<i64>, Option<String>)> {
-        let path = home_dir()
-            .ok_or_else(|| anyhow!("home do usuário não encontrada"))?
-            .join(".claude")
-            .join(".credentials.json");
+    /// Lê uma fonte, sem julgar validade — quem julga é `credentials`.
+    fn ler(fonte: CredSource) -> Result<ClaudeCreds> {
+        match fonte {
+            CredSource::Desktop => {
+                let t = claude_desktop::token()?;
+                Ok(ClaudeCreds {
+                    token: t.access_token,
+                    expires_at: t.expires_at,
+                    plan: t.plan,
+                    fonte,
+                })
+            }
+            CredSource::Cli => {
+                let path = home_dir()
+                    .ok_or_else(|| anyhow!("home do usuário não encontrada"))?
+                    .join(".claude")
+                    .join(".credentials.json");
+                if !path.exists() {
+                    return Err(anyhow!("não instalado nesta máquina"));
+                }
+                let raw = std::fs::read_to_string(&path)
+                    .with_context(|| format!("lendo {}", path.display()))?;
+                let parsed: CredentialsFile = serde_json::from_str(&raw)?;
+                let block = parsed
+                    .oauth
+                    .ok_or_else(|| anyhow!("`claudeAiOauth` ausente — não está logado"))?;
+                Ok(ClaudeCreds {
+                    token: Zeroizing::new(block.access_token),
+                    expires_at: block.expires_at,
+                    plan: block.subscription_type,
+                    fonte,
+                })
+            }
+        }
+    }
 
-        // Sem o arquivo, não existe outra fonte nesta máquina — e insistir em
-        // "rode o Claude Code para renovar" manda fazer o impossível em quem
-        // não tem o CLI instalado.
-        //
-        // O app desktop não substitui: o token daqui tem escopo
-        // `user:sessions:claude_code` e é o único que `/api/oauth/usage`
-        // aceita. O desktop autentica por sessão web e não deixa token legível
-        // (`%LOCALAPPDATA%\Claude` guarda apenas logs). Quem só usa o desktop
-        // desliga o provedor e a ferramenta para de reclamar.
-        if !path.exists() {
-            return Err(anyhow!(
-                "Claude Code não encontrado nesta máquina — desligue o Claude em Provedores, na bandeja"
-            ));
+    /// Primeira fonte com token vivo.
+    ///
+    /// Uma fonte ausente ou vencida não encerra a busca — é o caso comum de
+    /// quem trocou de aplicativo. Só quando as duas falham é que vira erro,
+    /// e aí ele diz o que houve com **cada uma**: mandar "rode o Claude
+    /// Code" para quem nem tem o CLI instalado é pedir o impossível.
+    fn credentials() -> Result<ClaudeCreds> {
+        let lidas = [CredSource::Desktop, CredSource::Cli]
+            .into_iter()
+            .map(|f| (f, Self::ler(f)));
+        Self::escolhe(lidas, Utc::now())
+    }
+
+    /// Puro: separado de `credentials` porque a leitura depende de disco,
+    /// de DPAPI e de qual aplicativo está instalado — nada disso cabe num
+    /// teste, mas a regra de precedência precisa caber.
+    fn escolhe(
+        lidas: impl Iterator<Item = (CredSource, Result<ClaudeCreds>)>,
+        agora: DateTime<Utc>,
+    ) -> Result<ClaudeCreds> {
+        let mut motivos = Vec::new();
+        for (fonte, lida) in lidas {
+            match lida {
+                Ok(cred) => match cred.vencimento(agora) {
+                    None => return Ok(cred),
+                    Some(texto) => motivos.push(format!("{}: {texto}", fonte.nome())),
+                },
+                Err(e) => motivos.push(format!("{}: {e:#}", fonte.nome())),
+            }
         }
 
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("lendo {}", path.display()))?;
-        let parsed: CredentialsFile = serde_json::from_str(&raw)?;
-        let block = parsed
-            .oauth
-            .ok_or_else(|| anyhow!("claudeAiOauth ausente — Claude Code não está logado"))?;
-        Ok((
-            Zeroizing::new(block.access_token),
-            block.expires_at,
-            block.subscription_type,
+        Err(anyhow!(
+            "nenhuma credencial do Claude serve ({}) — abra o Claude Desktop ou o Claude Code, ou desligue o Claude na bandeja",
+            motivos.join("; ")
         ))
     }
 
@@ -159,28 +252,14 @@ impl ClaudeCollector {
     }
 
     async fn fetch(&self) -> Result<ProviderSample> {
-        let (token, expires_at, plan) = Self::credentials()?;
-
-        // O token vale poucas horas, então "expirado" é comum e não indica
-        // problema. Já "expirado há dias" indica que o Claude Code não é usado
-        // nesta máquina — por isso a mensagem diz *quando*, e oferece as duas
-        // saídas em vez de só a que supõe o CLI instalado.
-        if let Some(exp) = expires_at {
-            let now = Utc::now();
-            if exp < now.timestamp_millis() {
-                let quando = DateTime::from_timestamp_millis(exp)
-                    .map(|t| format!(" em {}", local_moment(t, now)))
-                    .unwrap_or_default();
-                return Err(anyhow!(
-                    "token expirou{quando} — rode o Claude Code para renovar, ou desligue o Claude na bandeja"
-                ));
-            }
-        }
+        // A validade já foi conferida na cadeia de fontes: o que chega aqui
+        // é o primeiro token vivo.
+        let cred = Self::credentials()?;
 
         let resp = self
             .client
             .get(USAGE_URL)
-            .bearer_auth(token.as_str())
+            .bearer_auth(cred.token.as_str())
             .header("anthropic-beta", OAUTH_BETA)
             .header(
                 "User-Agent",
@@ -191,7 +270,8 @@ impl ClaudeCollector {
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(anyhow!(
-                "401 — token inválido; rode o Claude Code para renovar"
+                "401 — o token do {} foi recusado; abra-o para renovar",
+                cred.fonte.nome()
             ));
         }
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -209,7 +289,7 @@ impl ClaudeCollector {
 
         Ok(ProviderSample {
             provider: Provider::Claude,
-            plan,
+            plan: cred.plan,
             gauges,
             observed_at: now,
             source_at: Some(now),
@@ -360,5 +440,108 @@ mod tests {
         let parsed: UsageResponse = serde_json::from_str(json).unwrap();
         let g = ClaudeCollector::build_gauges(&parsed.limits, Utc::now());
         assert_eq!(g[0].severity, Severity::Critical);
+    }
+
+    fn cred(fonte: CredSource, expira_em_ms: Option<i64>, agora: DateTime<Utc>) -> ClaudeCreds {
+        ClaudeCreds {
+            token: Zeroizing::new(format!("sk-ant-{}", fonte.nome())),
+            expires_at: expira_em_ms.map(|d| agora.timestamp_millis() + d),
+            plan: Some("max".into()),
+            fonte,
+        }
+    }
+
+    /// O Desktop vem primeiro porque é a fonte que se mantém fresca
+    /// sozinha — quem usa o Desktop todo dia nunca vê a barra sumir.
+    #[test]
+    fn com_as_duas_vivas_vence_o_desktop() {
+        let agora = Utc::now();
+        let escolhida = ClaudeCollector::escolhe(
+            [
+                (CredSource::Desktop, Ok(cred(CredSource::Desktop, Some(3_600_000), agora))),
+                (CredSource::Cli, Ok(cred(CredSource::Cli, Some(3_600_000), agora))),
+            ]
+            .into_iter(),
+            agora,
+        )
+        .expect("credencial");
+        assert_eq!(escolhida.fonte, CredSource::Desktop);
+    }
+
+    /// Fonte vencida não encerra a busca: é o caso de quem trocou de
+    /// aplicativo, e abortar ali apagaria a barra com uma credencial boa
+    /// parada ao lado.
+    #[test]
+    fn fonte_vencida_cai_para_a_seguinte() {
+        let agora = Utc::now();
+        let escolhida = ClaudeCollector::escolhe(
+            [
+                (CredSource::Desktop, Ok(cred(CredSource::Desktop, Some(-1), agora))),
+                (CredSource::Cli, Ok(cred(CredSource::Cli, Some(3_600_000), agora))),
+            ]
+            .into_iter(),
+            agora,
+        )
+        .expect("credencial");
+        assert_eq!(escolhida.fonte, CredSource::Cli);
+    }
+
+    /// Fonte ausente também não encerra: a máquina pode ter só um dos dois.
+    #[test]
+    fn fonte_ausente_cai_para_a_seguinte() {
+        let agora = Utc::now();
+        let escolhida = ClaudeCollector::escolhe(
+            [
+                (CredSource::Desktop, Err(anyhow!("não encontrado"))),
+                (CredSource::Cli, Ok(cred(CredSource::Cli, Some(60_000), agora))),
+            ]
+            .into_iter(),
+            agora,
+        )
+        .expect("credencial");
+        assert_eq!(escolhida.fonte, CredSource::Cli);
+    }
+
+    /// Com duas fontes, "token expirou" sem dizer qual manda o usuário
+    /// adivinhar qual aplicativo abrir.
+    #[test]
+    fn falhando_as_duas_o_erro_cita_cada_uma() {
+        let agora = Utc::now();
+        let erro = ClaudeCollector::escolhe(
+            [
+                (CredSource::Desktop, Ok(cred(CredSource::Desktop, Some(-86_400_000), agora))),
+                (CredSource::Cli, Err(anyhow!("não instalado nesta máquina"))),
+            ]
+            .into_iter(),
+            agora,
+        );
+        // `unwrap_err` exigiria `Debug` em `ClaudeCreds`, e um `Debug`
+        // derivado imprimiria o token.
+        let erro = match erro {
+            Ok(_) => panic!("não deveria haver credencial válida"),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(erro.contains("Claude Desktop"), "{erro}");
+        assert!(erro.contains("expirou"), "{erro}");
+        assert!(erro.contains("Claude Code"), "{erro}");
+        assert!(erro.contains("não instalado"), "{erro}");
+    }
+
+    /// Sem expiração declarada não dá para provar que venceu — e um 401
+    /// resolve depois, sem descartar a fonte antes de tentar.
+    #[test]
+    fn expiracao_ausente_conta_como_viva() {
+        let agora = Utc::now();
+        assert!(cred(CredSource::Desktop, None, agora).vencimento(agora).is_none());
+    }
+
+    #[test]
+    fn vencimento_diz_quando_expirou() {
+        let agora = Utc::now();
+        let texto = cred(CredSource::Cli, Some(-7_200_000), agora)
+            .vencimento(agora)
+            .expect("vencido");
+        assert!(texto.starts_with("token expirou em "), "{texto}");
     }
 }
