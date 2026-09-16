@@ -1,6 +1,8 @@
 pub mod claude;
+pub mod claude_desktop;
 pub mod codex;
 pub mod cursor;
+pub mod win_secret;
 
 use crate::model::ProviderSample;
 
