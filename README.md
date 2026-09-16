@@ -1,6 +1,6 @@
 # IA Monitor
 
-Monitor unificado de consumo de IA no Windows: **Claude Code**, **Cursor** e
+Monitor unificado de consumo de IA no Windows: **Claude**, **Cursor** e
 **ChatGPT Codex** numa única pílula flutuante que expande em card.
 
 Inspirado em [usage-monitor-for-claude](https://github.com/jens-duttke/usage-monitor-for-claude),
@@ -107,11 +107,43 @@ Nenhuma conta precisou de chave de admin — nem as corporativas, que expõem o
 consumo do próprio usuário sem passar pelo painel do time. Vale para os dois
 lados: a mesma leitura funciona numa assinatura pessoal.
 
-### Claude Code — tempo real
+### Claude — tempo real, com duas fontes de credencial
 
-`GET https://api.anthropic.com/api/oauth/usage`
-Token de `~/.claude/.credentials.json` → `claudeAiOauth.accessToken`, com
+`GET https://api.anthropic.com/api/oauth/usage`, com
 `anthropic-beta: oauth-2025-04-20`.
+
+**A cota é da conta, não do aplicativo.** claude.ai, o Claude Desktop e o
+Claude Code consomem a mesma janela de 5h e o mesmo limite semanal — a
+própria Anthropic documenta que "your usage of all different Claude product
+surfaces (claude.ai, Claude Code, Claude Desktop) counts towards the same
+usage limit". O token é só a chave de leitura: o número não muda conforme
+qual aplicativo a forneceu, e não há dois consumos para somar.
+
+O que muda entre as fontes é **quanto tempo elas duram**:
+
+| Fonte | Onde | Quem renova |
+|---|---|---|
+| Claude Desktop | `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\config.json` → `oauth:tokenCacheV2` | o próprio Desktop, enquanto for aberto |
+| Claude Code | `~/.claude/.credentials.json` → `claudeAiOauth.accessToken` | só o CLI, quando é usado |
+
+O Desktop vem primeiro por isso: o token do CLI vale poucas horas e seca em
+quem migrou de aplicativo, e a barra sumia com um "rode o Claude Code para
+renovar" que é pedir para abrir uma ferramenta só para alimentar o monitor.
+Uma fonte ausente ou vencida não encerra a busca; só quando as duas falham é
+que vira erro, e aí ele diz o que houve com **cada uma**.
+
+O token do Desktop está cifrado pelo `safeStorage` do Electron — AES-256-GCM
+com a chave do `Local State` envelopada em DPAPI do usuário. E o cache é
+indexado por escopo: numa instalação real convivem quatro tokens, incluindo
+um de `user:profile` puro e o da integração com o Office, que não leem
+consumo nenhum. Por isso a escolha é pelo escopo declarado na chave, nunca
+pela ordem do mapa — que renderia 401 com o token bom parado ao lado.
+
+> Ao contrário do que este README afirmava, o Desktop **não** guarda só logs
+> em `%LOCALAPPDATA%\Claude`: instalado pela Store ele é um pacote MSIX, e o
+> `%APPDATA%` dele mora dentro do container. E `/api/oauth/usage` aceita o
+> token dele, apesar de o escopo `user:sessions:claude_code` não ser o único.
+> `cargo run --bin desktop_probe` é o diagnóstico que apurou isso.
 
 O array `limits[]` é auto-descritivo e a UI renderiza direto dele. Atenção:
 `is_active: false` **não** significa que o limite não existe — significa que
@@ -188,6 +220,8 @@ com cara de dado atual.
 ```
 crates/core/          núcleo sem UI — testável isoladamente
   collect/            um coletor por provedor, atrás de um trait comum
+    claude_desktop.rs segunda fonte de credencial do Claude
+    win_secret.rs     DPAPI + AES-GCM do safeStorage do Electron
   ingest/             backfill e leitura incremental do histórico
   store.rs            SQLite em %LOCALAPPDATA%\ia-monitor\
   analytics.rs        burn rate e projeção de esgotamento
@@ -210,7 +244,9 @@ ui/                   HTML/CSS/JS puro, sem bundler
   após cada reset conhecido — que é quando o número muda.
 - **Cota de requisição é recurso.** O `GetPlanInfo` do Cursor fica em cache
   por 6 h, e uma trava entre execuções impede que abrir e fechar o app em
-  sequência vire rajada. Em uso ativo dá ~62 requisições/hora nos três
+  sequência vire rajada. A atualização manual tem o mesmo cuidado dentro de
+  uma execução: piso de 30 s por provedor, porque expandir e recolher o card
+  é barato para quem clica e caro para a cota. Em uso ativo dá ~62 requisições/hora nos três
   provedores — eram 186 só em Claude e Cursor na primeira versão, antes de o
   Codex passar a consultar API.
 - **Uma janela só.** Pílula e card são a mesma janela redimensionada, não
@@ -247,6 +283,27 @@ compartilhada com qualquer outro app WebView2 da máquina.
 Chegar aos 60 MB exigiria desenhar a janela nativamente (Win32/Direct2D) em
 vez de usar um webview — outra arquitetura, não um ajuste.
 
+## Atualizar agora
+
+O ⟳ no card, o **Atualizar agora** da bandeja e o próprio ato de **expandir
+a pílula** pedem uma coleta imediata. Expandir conta porque é uma declaração
+de intenção: quem abre o card quer o número de agora, não o da última volta
+do relógio — que no modo ocioso pode ter 15 minutos.
+
+O pedido **antecipa** o relógio de cada provedor, nunca o ignora:
+
+| Trava | O pedido fura? | Porquê |
+|---|---|---|
+| Cadência de 180/900 s | sim | é exatamente o que se está pedindo |
+| Recuo por falha comum | sim | a rede voltou, a VPN conectou — insistir agora é o certo |
+| Punição por 429 | **não** | insistir contra um limite estourado piora o próprio problema |
+| Piso de 30 s por provedor | **não** | expandir e recolher em sequência não pode virar rajada |
+| Coleta pausada na bandeja | **não** | pausa é pausa — a UI diz isso em vez de fingir |
+
+O ⟳ gira enquanto a coleta acontece e para no `snapshot` seguinte. Se o
+provedor estiver de castigo por 429, o card continua dizendo "nova tentativa
+em 6m" — a resposta honesta, em vez de um giro que não representa trabalho.
+
 ## Quando uma fonte falha
 
 Um provedor indisponível **não apaga os números dos outros nem os próprios**.
@@ -273,13 +330,20 @@ receita para transformar um 429 pontual em permanente.
 A ferramenta lê credenciais corporativas do disco. As regras:
 
 - Tokens **nunca** são persistidos: lidos sob demanda, só em memória,
-  limpos com `zeroize`.
+  limpos com `zeroize`. Vale também para o do Claude Desktop, decifrado a
+  cada leitura e nunca gravado em claro.
+- A leitura do Desktop usa DPAPI **do usuário atual**: o segredo continua
+  amarrado ao perfil do Windows, e outra conta na mesma máquina não o abre.
+  Nenhum arquivo do Desktop é escrito.
+- O `refresh_token` do Claude é ignorado pelo mesmo motivo que o do Codex: a
+  rotação invalidaria o token do aplicativo de onde ele veio.
 - Rede restrita a `api.anthropic.com`, `api2.cursor.sh`, `cursor.com` e
   `chatgpt.com`. Zero telemetria.
 - Somente leitura do próprio consumo. **Nunca** usa o `refresh_token` do
   Codex — a rotação invalidaria o token do CLI.
-- Token do Claude expirado não é renovado por conta própria: a UI avisa para
-  rodar o Claude Code.
+- Token do Claude expirado não é renovado por conta própria: a ferramenta
+  tenta a outra fonte e, se nenhuma servir, a UI diz o que houve com cada
+  uma.
 - O webview não tem permissão de rede nem de arquivo; toda leitura de token
   acontece no Rust.
 
@@ -294,11 +358,13 @@ cargo tauri build          # gera o exe e o instalador NSIS
 cargo tauri dev            # desenvolvimento
 cargo run --bin probe      # medidores no terminal, sem UI
 cargo run --bin backfill   # importa o histórico e mostra os totais
-cargo test                 # 92 testes
+cargo run --bin desktop_probe  # diagnostica a credencial do Claude Desktop
+cargo test                 # 185 testes
 ```
 
-Na bandeja: mostrar, pausar coleta, iniciar com o Windows, sair.
-Clique na pílula expande; `Esc` recolhe.
+Na bandeja: mostrar, atualizar agora, pausar coleta, provedores, iniciar com
+o Windows, sair. Clique na pílula expande — e já pede uma coleta; `Esc`
+recolhe.
 
 A janela é ancorada pelo **canto inferior direito**: o card brota da pílula e
 o recolhimento a devolve ao mesmo ponto, mesmo quando o card precisou subir
