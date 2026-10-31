@@ -168,6 +168,12 @@ O token sai de `%APPDATA%\Cursor\User\globalStorage\state.vscdb`, aberto em
 `mode=ro` via URI: o arquivo tem ~376 MB e o Cursor costuma estar rodando.
 Medido em ~0 ms, sem cópia e sem lock.
 
+Desde o Cursor 3.27 o `cursorAuth/accessToken` vem cifrado:
+`cursor-safe-storage:v1:` + base64 de um blob `v10`, o mesmo `safeStorage` do
+Claude Desktop, com a chave em `%APPDATA%\Cursor\Local State`. Mandar o
+envelope cru como bearer dá **401**, que parece login vencido mas não é. Valor
+sem o prefixo (Cursor anterior) segue em claro, como antes.
+
 > O Cursor **não guarda contagem de token localmente** — os registros de
 > conversa no `state.vscdb` têm `tokenCount` zerado. A API é o único caminho.
 

@@ -3,12 +3,16 @@
 //! É o esquema `os_crypt` do Chromium, em duas camadas: uma chave AES-256
 //! sorteada uma vez e guardada no `Local State` **envelopada em DPAPI**, e os
 //! valores cifrados com AES-256-GCM usando essa chave. Vale para o token do
-//! Claude Desktop e para o cookie jar de qualquer app Electron.
+//! Claude Desktop, para o token do Cursor (3.27+) e para o cookie jar de
+//! qualquer app Electron.
 //!
 //! Nada aqui persiste segredo: tudo sai em `Zeroizing` e morre com o escopo.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
+use serde_json::Value;
+use std::path::Path;
 use zeroize::Zeroizing;
 
 /// Prefixo do `encrypted_key` no `Local State` (`kDPAPIKeyPrefix`).
@@ -26,6 +30,24 @@ pub fn strip_dpapi_prefix(raw: &[u8]) -> Result<&[u8]> {
         bail!("`os_crypt.encrypted_key` sem o prefixo DPAPI — formato desconhecido");
     }
     Ok(&raw[DPAPI_PREFIX.len()..])
+}
+
+/// Chave mestra do `os_crypt`, lida do `Local State` de um app Electron e
+/// desenvelopada por DPAPI. `dir` é o diretório de dados do app — o que tem o
+/// `Local State` na raiz.
+pub fn master_key(dir: &Path) -> Result<Zeroizing<Vec<u8>>> {
+    let caminho = dir.join("Local State");
+    let raw = std::fs::read_to_string(&caminho)
+        .with_context(|| format!("lendo {}", caminho.display()))?;
+    let json: Value = serde_json::from_str(&raw).context("`Local State` não é JSON válido")?;
+    let b64 = json
+        .pointer("/os_crypt/encrypted_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("`Local State` sem `os_crypt.encrypted_key`"))?;
+    let envelope = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .context("`encrypted_key` não é base64")?;
+    dpapi_unprotect(strip_dpapi_prefix(&envelope)?)
 }
 
 /// Decifra um valor `v10` do `os_crypt`.
@@ -155,13 +177,13 @@ pub fn dpapi_unprotect(_input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ring::aead::BoundKey;
 
     /// Monta um blob no formato do Chromium, para os testes não dependerem de
-    /// um arquivo real do Claude Desktop.
-    fn cifra(key: &[u8; 32], nonce: [u8; NONCE_LEN], claro: &[u8]) -> Vec<u8> {
+    /// um arquivo real do Claude Desktop ou do Cursor.
+    pub(crate) fn cifra(key: &[u8; 32], nonce: [u8; NONCE_LEN], claro: &[u8]) -> Vec<u8> {
         struct Fixo([u8; NONCE_LEN], bool);
         impl ring::aead::NonceSequence for Fixo {
             fn advance(&mut self) -> std::result::Result<Nonce, ring::error::Unspecified> {

@@ -13,6 +13,7 @@
 //! o comprimento; o corpo da resposta HTTP aparece só como tamanho.
 
 use ia_monitor_core::collect::claude_desktop as desktop;
+use ia_monitor_core::collect::win_secret::master_key;
 use serde_json::Value;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -82,7 +83,7 @@ async fn main() {
     println!("\nescolhido: {}", caminho_curto(&dir));
 
     println!("\n== Chave mestra (Local State → DPAPI) ==");
-    match desktop::master_key(&dir) {
+    match master_key(&dir) {
         Ok(k) => println!("  chave de {} bytes{}", k.len(), if k.len() == 32 { " (AES-256, como esperado)" } else { " — ESPERADO 32" }),
         Err(e) => {
             println!("  FALHOU: {e:#}");
@@ -119,7 +120,7 @@ async fn main() {
 
     // O shape completo ajuda a ajustar a extração quando o formato mudar.
     println!("\n== Formato do JSON decifrado ==");
-    match desktop::master_key(&dir).and_then(|k| shape(&dir, &k)) {
+    match master_key(&dir).and_then(|k| shape(&dir, &k)) {
         Ok(linhas) => linhas.iter().for_each(|l| println!("{l}")),
         Err(e) => println!("  (não foi possível descrever: {e:#})"),
     }

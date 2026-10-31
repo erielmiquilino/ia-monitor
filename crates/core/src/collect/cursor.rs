@@ -8,18 +8,28 @@
 //! Atenção: o Cursor usa DOIS esquemas de auth. O connect-rpc aqui quer
 //! `Authorization: Bearer`; o histórico evento a evento em
 //! `cursor.com/api/dashboard/*` quer cookie + header `Origin`.
+//!
+//! Desde o 3.27 o token não fica mais em claro: vem cifrado pelo
+//! `safeStorage` do Electron, o mesmo esquema do Claude Desktop (ver
+//! `win_secret`). Mandar o valor cru como bearer dá 401.
 
+use crate::collect::win_secret::{decrypt_v10, master_key};
 use crate::collect::{retry_after_seconds, Collector, RateLimited};
 use crate::model::{
     expected_fraction, format_pt_br, reset_label, Gauge, Provider, ProviderSample, Severity,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine;
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
 const RPC_BASE: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService";
+/// Envelope dos valores cifrados: `cursor-safe-storage:v1:` + base64 de um
+/// blob `v10` do `os_crypt`.
+const SAFE_STORAGE_PREFIX: &str = "cursor-safe-storage:";
+const SAFE_STORAGE_V1: &str = "v1:";
 /// O nome do plano muda raramente. Consultá-lo a cada ciclo dobrava o número
 /// de requisições ao Cursor sem acrescentar nada.
 const PLAN_CACHE_SECONDS: u64 = 6 * 3600;
@@ -96,14 +106,45 @@ impl CursorCollector {
         Self { client }
     }
 
-    pub(crate) fn state_db_path() -> Result<std::path::PathBuf> {
+    /// Diretório de dados do Electron: tem o `Local State` com a chave do
+    /// `safeStorage` na raiz.
+    fn user_data_dir() -> Result<std::path::PathBuf> {
         let appdata = std::env::var_os("APPDATA")
             .ok_or_else(|| anyhow!("APPDATA não definido"))?;
-        Ok(std::path::PathBuf::from(appdata)
-            .join("Cursor")
+        Ok(std::path::PathBuf::from(appdata).join("Cursor"))
+    }
+
+    pub(crate) fn state_db_path() -> Result<std::path::PathBuf> {
+        Ok(Self::user_data_dir()?
             .join("User")
             .join("globalStorage")
             .join("state.vscdb"))
+    }
+
+    /// Abre o valor guardado: decifra o envelope do `safeStorage` ou, em
+    /// versões anteriores ao 3.27, devolve o JWT em claro como veio.
+    ///
+    /// A chave chega por closure para só tocar o DPAPI quando há o que
+    /// decifrar — e para os testes não dependerem do `Local State` real.
+    fn abre_token(
+        guardado: &str,
+        chave: impl FnOnce() -> Result<Zeroizing<Vec<u8>>>,
+    ) -> Result<Zeroizing<String>> {
+        let Some(envelope) = guardado.strip_prefix(SAFE_STORAGE_PREFIX) else {
+            return Ok(Zeroizing::new(guardado.to_owned()));
+        };
+        // Versão nova é erro com nome, nunca o envelope mandado como bearer.
+        let Some(b64) = envelope.strip_prefix(SAFE_STORAGE_V1) else {
+            let versao = envelope.split(':').next().unwrap_or_default();
+            bail!("token do Cursor em formato {versao:?} — esquema de cifra não suportado");
+        };
+        let blob = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .context("token cifrado do Cursor não é base64")?;
+        let claro = decrypt_v10(&chave()?, &blob).context("decifrando o token do Cursor")?;
+        let token = std::str::from_utf8(&claro)
+            .map_err(|_| anyhow!("token decifrado do Cursor não é texto"))?;
+        Ok(Zeroizing::new(token.to_owned()))
     }
 
     /// Lê o access token sem copiar o banco e sem bloquear o Cursor.
@@ -122,18 +163,19 @@ impl CursorCollector {
         )
         .with_context(|| "abrindo state.vscdb somente-leitura")?;
 
-        let token: String = conn
+        let guardado: Zeroizing<String> = conn
             .query_row(
                 "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
                 [],
                 |row| row.get(0),
             )
+            .map(Zeroizing::new)
             .map_err(|_| anyhow!("token não encontrado — faça login no Cursor"))?;
 
-        if token.is_empty() {
+        if guardado.is_empty() {
             return Err(anyhow!("token vazio — faça login no Cursor"));
         }
-        Ok(Zeroizing::new(token))
+        Self::abre_token(&guardado, || master_key(&Self::user_data_dir()?))
     }
 
     async fn rpc<T: for<'de> Deserialize<'de>>(
@@ -378,6 +420,54 @@ mod tests {
         let usage: CurrentPeriodUsage = serde_json::from_str(json).unwrap();
         let g = CursorCollector::build_gauges(&usage, Utc::now()).unwrap();
         assert!(g.iter().all(|x| x.expected.is_none()));
+    }
+
+    const CHAVE: [u8; 32] = [5u8; 32];
+    const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.assinatura";
+
+    fn chave_de_teste() -> Result<Zeroizing<Vec<u8>>> {
+        Ok(Zeroizing::new(CHAVE.to_vec()))
+    }
+
+    fn envelope(versao: &str, claro: &str) -> String {
+        let blob = crate::collect::win_secret::tests::cifra(&CHAVE, [1u8; 12], claro.as_bytes());
+        format!(
+            "cursor-safe-storage:{versao}:{}",
+            base64::engine::general_purpose::STANDARD.encode(blob)
+        )
+    }
+
+    /// Cursor 3.27+: o valor do `state.vscdb` é o envelope, e o bearer
+    /// precisa ser o JWT de dentro dele.
+    #[test]
+    fn decifra_o_envelope_do_safe_storage() {
+        let token = CursorCollector::abre_token(&envelope("v1", JWT), chave_de_teste).unwrap();
+        assert_eq!(token.as_str(), JWT);
+    }
+
+    /// Antes do 3.27 o JWT fica em claro — e aí o DPAPI nem é tocado.
+    #[test]
+    fn token_em_claro_passa_sem_tocar_na_chave() {
+        let token =
+            CursorCollector::abre_token(JWT, || panic!("não deveria ler a chave")).unwrap();
+        assert_eq!(token.as_str(), JWT);
+    }
+
+    /// Um `v2` futuro tem que falhar com nome, não virar bearer e dar 401.
+    #[test]
+    fn versao_desconhecida_do_envelope_falha_com_nome() {
+        let erro = CursorCollector::abre_token(&envelope("v2", JWT), chave_de_teste)
+            .unwrap_err()
+            .to_string();
+        assert!(erro.contains("v2"), "o erro precisa dizer o que viu: {erro}");
+    }
+
+    #[test]
+    fn envelope_com_chave_errada_nao_decifra() {
+        let erro = CursorCollector::abre_token(&envelope("v1", JWT), || {
+            Ok(Zeroizing::new(vec![9u8; 32]))
+        });
+        assert!(erro.is_err());
     }
 
     #[test]
