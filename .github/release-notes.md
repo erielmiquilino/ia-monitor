@@ -20,7 +20,9 @@ O app lê, **somente leitura e só na sua própria máquina**:
 - `...\Packages\Claude_*\...\config.json` — o token do Claude Desktop,
   cifrado pelo Windows (DPAPI) e decifrado em memória a cada leitura
 - `~/.claude/.credentials.json` — o token que o Claude Code já mantém
-- `%APPDATA%\Cursor\...\state.vscdb` — o token de sessão do Cursor
+- `%APPDATA%\Cursor\...\state.vscdb` — o token de sessão do Cursor; desde o
+  Cursor 3.27 ele vem cifrado pelo Windows (DPAPI, chave no `Local State`
+  do Cursor) e é decifrado em memória a cada leitura
 - `~/.codex/auth.json` e `~/.codex/sessions/` — o token do Codex e os logs
   que servem de reserva quando a API não responde
 
